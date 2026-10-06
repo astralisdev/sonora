@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 APP     := build/Sonora.app
 export MACOSX_DEPLOYMENT_TARGET := 14.2
 export CGO_CFLAGS  := -O2 -mmacosx-version-min=14.2
@@ -13,7 +13,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -m1 -oE '"(Developer ID Application|Apple Development): [^"]+"' | tr -d '"')
 SIGN := $(if $(SIGN_IDENTITY),$(SIGN_IDENTITY),-)
 
-.PHONY: app run install test universal zip icon clean
+.PHONY: app run install test universal zip dmg icon clean
 
 # Builds build/Sonora.app for this Mac's architecture.
 app:
@@ -48,6 +48,11 @@ universal:
 	sed 's/VERSION/$(VERSION)/g' Info.plist > $(APP)/Contents/Info.plist
 	mkdir -p $(APP)/Contents/Resources && cp assets/Sonora.icns $(APP)/Contents/Resources/
 	codesign --force --sign "$(SIGN)" $(APP)
+
+# Drag-to-Applications disk image for sharing: build/Sonora-$(VERSION).dmg
+dmg: universal
+	scripts/make-dmg.sh $(VERSION)
+	codesign --force --sign "$(SIGN)" build/Sonora-$(VERSION).dmg
 
 zip: universal
 	cd build && ditto -c -k --keepParent Sonora.app Sonora-$(VERSION).zip

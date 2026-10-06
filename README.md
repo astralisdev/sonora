@@ -38,8 +38,9 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 
 ### Download
 
-Grab `Sonora.zip` from [Releases](https://github.com/astralisdev/sonora/releases), unzip it and move **Sonora.app** to `/Applications`.
-The app is not notarized yet, so the first time **right-click → Open** (or run `xattr -dr com.apple.quarantine /Applications/Sonora.app`).
+Download `Sonora-<version>.dmg` from [Releases](https://github.com/astralisdev/sonora/releases), open it, and drag **Sonora** onto **Applications**.
+
+Sonora isn't notarized by Apple yet, so the first time you open it macOS says it can't verify the developer. Click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to Sonora. You only need to do this once.
 
 ### Build from source
 
@@ -51,7 +52,7 @@ cd sonora
 make install      # builds Sonora.app, copies it to /Applications and launches it
 ```
 
-Other targets: `make app` (build only, into `build/`), `make run`, `make test`, `make universal` (arm64 + x86_64), `make zip`.
+Other targets: `make app` (build only, into `build/`), `make run`, `make test`, `make universal` (arm64 + x86_64), `make dmg` (drag-to-Applications disk image), `make zip`.
 
 `make` signs the app with your first *Developer ID* or *Apple Development* certificate if you have one, so macOS remembers the permission below across rebuilds; with no certificate it falls back to an ad-hoc signature, and macOS asks again after every rebuild.
 
@@ -89,6 +90,7 @@ The UI and audio layers are Objective-C called through cgo, since AppKit and the
 ## Known limitations
 
 - **Call apps (WhatsApp, FaceTime, Zoom…)** are detected from the echo canceller's signature (the app reads a speaker device back as an input), and a call lasts as long as the app keeps the microphone running. During a call, **Even Out Voices** (on by default, in *During Calls*) levels speech to the same loudness, about -18 dBFS RMS at 100%. It adapts slowly, ignores pauses, and holds steady when people join or leave or WhatsApp reconfigures its audio. The call slider then sets how loud that level is.
+- **When a call is the only thing playing**, Sonora steps aside entirely: the call sounds exactly as it would without Sonora, with no added delay. Sonora steps back in, lowering other apps and leveling voices, as soon as another app actually makes sound. A paused player that keeps its audio stream open doesn't count.
 - **Latency:** an app that is not at 100% is heard about 60 ms late. Most of that delay comes from macOS's tap and aggregate-device path, and Sonora keeps its own part small (128-frame buffers, 1.3 ms limiter). You can notice it as a slight lip-sync offset on video calls. At 100%, Sonora steps out of the way within 3 s and there is no added delay.
 - Creating or removing a tap can cause a very short glitch in other audio.
 - Boosting is limited to +6 dB (150%).
