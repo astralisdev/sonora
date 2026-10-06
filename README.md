@@ -109,6 +109,7 @@ SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains, lev
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot-welcome welcome.png   # renders the welcome window
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot-tip tip.png           # renders the call tip
 ./build/Sonora.app/Contents/MacOS/Sonora -compare com.apple.Safari       # direct vs Sonora at 100%, with spoken labels
+make fakecall && build/fakecall 60   # a stand-in voice call (Apple voice processing + a looping voice), no one to call needed
 SONORA_SIMULATE_NO_PERMISSION=1 ./build/Sonora.app/Contents/MacOS/Sonora  # exercises the permission watchdog
 ```
 

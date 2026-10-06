@@ -13,7 +13,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -m1 -oE '"(Developer ID Application|Apple Development): [^"]+"' | tr -d '"')
 SIGN := $(if $(SIGN_IDENTITY),$(SIGN_IDENTITY),-)
 
-.PHONY: app run install test universal zip dmg icon clean
+.PHONY: app run install test universal zip dmg icon fakecall clean
 
 # Builds build/Sonora.app for this Mac's architecture.
 app:
@@ -68,6 +68,12 @@ icon:
 	done
 	iconutil -c icns build/icon/Sonora.iconset -o assets/Sonora.icns
 	sips -z 256 256 build/icon/icon_1024.png --out assets/icon.png >/dev/null
+
+# A stand-in for a voice call (Apple voice processing + a looping voice), to
+# test call handling without calling anyone: build/fakecall [seconds]
+fakecall:
+	mkdir -p build
+	clang -fobjc-arc -framework AVFoundation -framework AudioToolbox tools/fakecall.m -o build/fakecall
 
 clean:
 	rm -rf build
