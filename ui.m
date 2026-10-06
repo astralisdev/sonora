@@ -7,7 +7,6 @@
 #include "sonora.h"
 
 static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
-static NSString *const kShowSystemSoundsKey = @"ShowSystemSounds";
 
 static BOOL reduceMotion(void) {
     return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
@@ -419,34 +418,17 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
         [_menu addItem:NSMenuItem.separatorItem];
     }
 
-    BOOL showSystem = [NSUserDefaults.standardUserDefaults boolForKey:kShowSystemSoundsKey];
-    NSMutableArray<SNApp *> *apps = [NSMutableArray new], *system = [NSMutableArray new];
-    for (SNApp *app in engine.apps) [(app.isSystem ? system : apps) addObject:app];
-
     NSUInteger index = 0;
-    if (apps.count == 0) {
+    if (engine.apps.count == 0) {
         NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"No apps are playing audio" action:nil keyEquivalent:@""];
         empty.enabled = NO;
         [_menu addItem:empty];
     }
-    for (SNApp *app in apps) [self addRow:app index:index++];
-
-    if (showSystem && system.count) {
-        [_menu addItem:[NSMenuItem sectionHeaderWithTitle:@"Siri, Alerts & Background Audio"]];
-        for (SNApp *app in system) [self addRow:app index:index++];
-    }
+    for (SNApp *app in engine.apps) [self addRow:app index:index++];
 
     [_menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *reset = [self addItem:@"Reset All Levels" action:@selector(resetAll:) key:@""];
     reset.toolTip = @"Set every app back to 100%, its normal volume.";
-
-    NSString *systemTitle = system.count && !showSystem
-        ? [NSString stringWithFormat:@"Show Siri, Alerts & Background Audio (%lu)", (unsigned long)system.count]
-        : @"Show Siri, Alerts & Background Audio";
-    NSMenuItem *systemItem = [self addItem:systemTitle action:@selector(toggleSystemSounds:) key:@""];
-    systemItem.toolTip = @"Also list macOS and background processes that make sound, such as Siri, "
-                         @"notification chimes and dictation, so you can set their volume too.";
-    systemItem.state = showSystem ? NSControlStateValueOn : NSControlStateValueOff;
 
     NSMenuItem *login = [self addItem:@"Launch at Login" action:@selector(toggleLogin:) key:@""];
     login.state = SMAppService.mainAppService.status == SMAppServiceStatusEnabled ? NSControlStateValueOn : NSControlStateValueOff;
@@ -472,11 +454,6 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 }
 
 - (void)resetAll:(id)sender { [[SNEngine shared] resetAll]; }
-
-- (void)toggleSystemSounds:(id)sender {
-    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-    [d setBool:![d boolForKey:kShowSystemSoundsKey] forKey:kShowSystemSoundsKey];
-}
 
 - (void)openPrivacySettings:(id)sender {
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:

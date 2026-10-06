@@ -24,7 +24,7 @@ extern NSNotificationName const SNEnginePermissionDidChangeNotification;
 + (instancetype)shared;
 - (void)start;
 
-// Apps that are playing audio right now, or were tapped recently. Main thread only.
+// Regular apps that are playing audio, or did recently. Main thread only.
 @property(nonatomic, readonly) NSArray<SNApp *> *apps;
 @property(nonatomic, readonly) NSString *outputDeviceName;
 

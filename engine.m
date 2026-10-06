@@ -640,6 +640,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSDate *now = [NSDate date];
     NSMutableArray<SNApp *> *visible = [NSMutableArray new];
     for (SNApp *app in scanned) {
+        if (app.isSystem) continue; // Siri, dictation, alert sounds… are macOS's business, not the user's mix
         if (app.playing) _lastPlaying[app.key] = now;
         NSDate *last = _lastPlaying[app.key];
         if (last && [now timeIntervalSinceDate:last] < kTapGracePeriod) [visible addObject:app];
