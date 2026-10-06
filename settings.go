@@ -24,11 +24,17 @@ type AppSetting struct {
 // taps read it, measured with -calibrate on AirPods.
 const defaultCallBoostDB = 20
 
+// defaultCallDuckDB is how much other apps are lowered during a call, so music
+// from the speakers doesn't leak into the microphone (echo cancellers remove
+// speech well but music poorly).
+const defaultCallDuckDB = 12
+
 type store struct {
 	mu    sync.Mutex
 	path  string
 	apps  map[string]AppSetting
 	boost *float64 // callBoostDB override from settings.json
+	duck  *float64 // callDuckDB from settings.json
 	timer *time.Timer
 }
 
@@ -36,6 +42,7 @@ type store struct {
 type settingsFile struct {
 	Apps        map[string]AppSetting `json:"apps"`
 	CallBoostDB *float64              `json:"callBoostDB,omitempty"`
+	CallDuckDB  *float64              `json:"callDuckDB,omitempty"`
 }
 
 var settings = &store{apps: map[string]AppSetting{}}
@@ -78,6 +85,10 @@ func (s *store) load() error {
 		v := math.Max(0, math.Min(*b, 30))
 		s.boost = &v
 	}
+	if d := file.CallDuckDB; d != nil && !math.IsNaN(*d) {
+		v := math.Max(0, math.Min(*d, 100))
+		s.duck = &v
+	}
 	return nil
 }
 
@@ -95,7 +106,7 @@ func (s *store) scheduleSave() {
 
 func (s *store) save() {
 	s.mu.Lock()
-	data, err := json.MarshalIndent(settingsFile{Apps: s.apps, CallBoostDB: s.boost}, "", "  ")
+	data, err := json.MarshalIndent(settingsFile{Apps: s.apps, CallBoostDB: s.boost, CallDuckDB: s.duck}, "", "  ")
 	path := s.path
 	s.mu.Unlock()
 	if err != nil {
@@ -162,4 +173,23 @@ func snCallBoostDB() C.double {
 		return C.double(*settings.boost)
 	}
 	return defaultCallBoostDB
+}
+
+//export snCallDuckDB
+func snCallDuckDB() C.double {
+	settings.mu.Lock()
+	defer settings.mu.Unlock()
+	if settings.duck != nil {
+		return C.double(*settings.duck)
+	}
+	return defaultCallDuckDB
+}
+
+//export snSetCallDuckDB
+func snSetCallDuckDB(dB C.double) {
+	settings.mu.Lock()
+	defer settings.mu.Unlock()
+	v := math.Max(0, math.Min(float64(dB), 100))
+	settings.duck = &v
+	settings.scheduleSave()
 }

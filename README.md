@@ -22,6 +22,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 - One slider per app that is playing audio, from 0% to 150% (boost).
 - Click an app's icon to mute it.
 - Volumes are remembered per app and re-applied whenever it plays again.
+- **During calls**, other apps fade down automatically (by 12 dB by default; a little, a lot, mute, or off), and fade back when the call ends. This stops speaker music from leaking into your microphone: call apps' echo cancellers remove speech well but music poorly.
 - Browser and app helper processes are grouped under the app you know (Chrome, Safari, WhatsApp…).
 - No audio driver or kernel extension to install, and no virtual device to pick. It works with whatever output you're using, including AirPods, and follows output changes automatically.
 - Apps you leave at 100% are not touched at all.

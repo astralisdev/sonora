@@ -7,6 +7,8 @@ extern NSNotificationName const SNEngineAppsDidChangeNotification;
 extern NSNotificationName const SNEngineVolumeDidChangeNotification;
 // Posted when permissionProblem changes.
 extern NSNotificationName const SNEnginePermissionDidChangeNotification;
+// Posted when a call starts and other apps begin fading down.
+extern NSNotificationName const SNEngineCallDuckingDidStartNotification;
 
 // One user-facing app, possibly made of several audio processes (e.g. a browser
 // and its helper processes all count as the browser).
@@ -33,6 +35,10 @@ extern NSNotificationName const SNEnginePermissionDidChangeNotification;
 // app is left muted.
 @property(nonatomic, readonly) BOOL permissionProblem;
 - (void)retryPermission;
+
+// How much other apps are lowered while a call is active: 0 = off, 6 or 12 dB,
+// 100 = muted. Persisted in settings.json as callDuckDB.
+@property(nonatomic) double callDuckDB;
 
 - (double)volumeForKey:(NSString *)key;   // percent, 0–150
 - (BOOL)mutedForKey:(NSString *)key;

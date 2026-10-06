@@ -25,6 +25,7 @@ static BOOL gSimulateNoPermission;
 NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidChange";
 NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeDidChange";
 NSNotificationName const SNEnginePermissionDidChangeNotification = @"SNEnginePermissionDidChange";
+NSNotificationName const SNEngineCallDuckingDidStartNotification = @"SNEngineCallDuckingDidStart";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
 // video doesn't rebuild the tap (and briefly play at full volume) every time.
@@ -483,6 +484,8 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSTimer *_timer;
     BOOL _refreshPending;
     BOOL _permissionProblem;
+    float _duck;          // current extra gain for non-call apps while a call is active (1 = none)
+    NSTimer *_duckTimer;  // fades _duck towards its target
 }
 
 + (instancetype)shared {
@@ -500,6 +503,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     _lastNonUnity = [NSMutableDictionary new];
     _observedProcesses = [NSMutableSet new];
     _apps = @[];
+    _duck = 1;
     return self;
 }
 
@@ -675,6 +679,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     };
     BOOL changed = ![signature(_apps) isEqualToString:signature(visible)];
     _apps = visible;
+    [self updateDuck];
     [self apply];
     [self checkPermission];
     if (changed) [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineAppsDidChangeNotification object:self];
@@ -687,6 +692,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
     for (SNApp *app in _permissionProblem ? @[] : _apps) {
         float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]);
+        if (!app.inCall) gain *= _duck; // lowered while a call is going on
         if (gain != 1.f) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
@@ -729,6 +735,51 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             }
         }];
     });
+}
+
+#pragma mark - Lowering other apps during calls
+
+- (BOOL)callActive {
+    for (SNApp *app in _apps) if (app.inCall) return YES;
+    return NO;
+}
+
+- (double)callDuckDB { return snCallDuckDB(); }
+
+- (void)setCallDuckDB:(double)dB {
+    snSetCallDuckDB(dB);
+    [self updateDuck];
+}
+
+// Fades other apps down when a call starts and back up when it ends, rather
+// than jumping, so the change isn't jarring.
+- (void)updateDuck {
+    double dB = snCallDuckDB();
+    float target = 1;
+    if (self.callActive && dB > 0) target = dB >= 100 ? 0 : (float)pow(10.0, -dB / 20.0);
+    if (fabsf(target - _duck) < 1e-4) return;
+    if (_duckTimer) return; // already fading; the timer reads the latest target each tick
+    __weak SNEngine *weakSelf = self;
+    _duckTimer = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *t) {
+        SNEngine *e = weakSelf;
+        if (!e) { [t invalidate]; return; }
+        double db = snCallDuckDB();
+        float goal = 1;
+        if (e.callActive && db > 0) goal = db >= 100 ? 0 : (float)pow(10.0, -db / 20.0);
+        float step = 1.0f / 30 / 0.8f; // full swing in 0.8 s
+        if (fabsf(goal - e->_duck) <= step) {
+            e->_duck = goal;
+            [t invalidate];
+            e->_duckTimer = nil;
+        } else {
+            e->_duck += goal > e->_duck ? step : -step;
+        }
+        [e apply];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:_duckTimer forMode:NSRunLoopCommonModes];
+    if (target < 1 && _duck == 1) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineCallDuckingDidStartNotification object:self];
+    }
 }
 
 - (double)volumeForKey:(NSString *)key {
@@ -813,3 +864,4 @@ void SNCalibrate(const char *bundleID) {
         printf("done\n");
     }
 }
+

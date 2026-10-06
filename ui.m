@@ -278,6 +278,7 @@ static void animateIn(NSView *view, NSUInteger index) {
     [nc addObserver:self selector:@selector(appsChanged:) name:SNEngineAppsDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(volumeChanged:) name:SNEngineVolumeDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(permissionChanged:) name:SNEnginePermissionDidChangeNotification object:nil];
+    [nc addObserver:self selector:@selector(callStarted:) name:SNEngineCallDuckingDidStartNotification object:nil];
     [[SNEngine shared] start];
     [self announce:@"SONORA"];
 }
@@ -313,6 +314,10 @@ static void animateIn(NSView *view, NSUInteger index) {
     [self updateStatusIcon];
     if ([SNEngine shared].permissionProblem) [self announce:@"NO PERMISSION"];
     [self appsChanged:note];
+}
+
+- (void)callStarted:(NSNotification *)note {
+    [self announce:@"CALL MODE"];
 }
 
 #pragma mark - Deciphering title
@@ -430,6 +435,24 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     NSMenuItem *reset = [self addItem:@"Reset All Levels" action:@selector(resetAll:) key:@""];
     reset.toolTip = @"Set every app back to 100%, its normal volume.";
 
+    // During calls: how much to lower everything except the call.
+    NSMenuItem *duckItem = [[NSMenuItem alloc] initWithTitle:@"During Calls" action:nil keyEquivalent:@""];
+    duckItem.toolTip = @"Turn other apps down while you're in a call, so music from your speakers "
+                       @"doesn't reach your microphone.";
+    NSMenu *duckMenu = [NSMenu new];
+    double current = engine.callDuckDB;
+    NSArray *choices = @[ @[ @"Leave Other Apps Alone", @0 ], @[ @"Lower Other Apps a Little", @6 ],
+                          @[ @"Lower Other Apps a Lot", @12 ], @[ @"Mute Other Apps", @100 ] ];
+    for (NSArray *choice in choices) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:choice[0] action:@selector(setCallDuck:) keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = choice[1];
+        item.state = fabs([choice[1] doubleValue] - current) < 0.5 ? NSControlStateValueOn : NSControlStateValueOff;
+        [duckMenu addItem:item];
+    }
+    duckItem.submenu = duckMenu;
+    [_menu addItem:duckItem];
+
     NSMenuItem *login = [self addItem:@"Launch at Login" action:@selector(toggleLogin:) key:@""];
     login.state = SMAppService.mainAppService.status == SMAppServiceStatusEnabled ? NSControlStateValueOn : NSControlStateValueOff;
 
@@ -454,6 +477,10 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 }
 
 - (void)resetAll:(id)sender { [[SNEngine shared] resetAll]; }
+
+- (void)setCallDuck:(NSMenuItem *)sender {
+    [SNEngine shared].callDuckDB = [sender.representedObject doubleValue];
+}
 
 - (void)openPrivacySettings:(id)sender {
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
