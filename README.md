@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" width="128" alt="Sonora icon"></p>
+
 # Sonora
 
 **Per-app volume control for macOS, right in your menu bar.**
@@ -23,7 +25,9 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 - Browser and app helper processes are grouped under the app you know (Chrome, Safari, WhatsApp…).
 - No audio driver or kernel extension to install, and no virtual device to pick. It works with whatever output you're using, including AirPods, and follows output changes automatically.
 - Apps you leave at 100% are not touched at all.
-- The menu bar title "deciphers" into the app name and level whenever you move a slider, then goes back to the plain icon. (It stays still if macOS *Reduce Motion* is on.)
+- The menu bar title "deciphers" into the app name and level whenever you move a slider, then goes back to the plain icon. Menu rows slide in, and playing apps show bouncing activity bars (green during a call). All animation stops if macOS *Reduce Motion* is on.
+- Background and system processes (notification chimes, Siri, speech…) are kept in a separate **System Sounds** section, hidden by default.
+- If Sonora can't capture audio (System Audio Recording denied), it stops tapping so no app is ever left silent, and the menu shows how to fix it.
 
 ## Requirements
 
@@ -96,7 +100,9 @@ Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceili
 ```sh
 ./build/Sonora.app/Contents/MacOS/Sonora -list          # audio apps; PLAYING / CALL / idle
 ./build/Sonora.app/Contents/MacOS/Sonora -calibrate net.whatsapp.WhatsApp   # tune callBoostDB during a call
-SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains and measured levels
+SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains, levels and dropouts
+./build/Sonora.app/Contents/MacOS/Sonora -snapshot rows.png   # renders a menu row for every audio process
+SONORA_SIMULATE_NO_PERMISSION=1 ./build/Sonora.app/Contents/MacOS/Sonora  # exercises the permission watchdog
 ```
 
 ## Roadmap

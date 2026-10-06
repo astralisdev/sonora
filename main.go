@@ -7,7 +7,7 @@ package main
 
 /*
 #cgo CFLAGS: -fobjc-arc -Wno-unused-command-line-argument
-#cgo LDFLAGS: -framework Cocoa -framework CoreAudio -framework ServiceManagement
+#cgo LDFLAGS: -framework Cocoa -framework CoreAudio -framework QuartzCore -framework ServiceManagement
 #include "sonora.h"
 */
 import "C"
@@ -30,6 +30,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	list := flag.Bool("list", false, "list audio processes grouped by app and exit")
 	calibrate := flag.String("calibrate", "", "debug: compare an app's direct audio with compensated replays")
+	snapshot := flag.String("snapshot", "", "debug: render a menu row for every audio process to this PNG file")
 	flag.Parse()
 
 	switch {
@@ -39,6 +40,10 @@ func main() {
 	case *calibrate != "":
 		cs := C.CString(*calibrate)
 		C.SNCalibrate(cs)
+		return
+	case *snapshot != "":
+		cs := C.CString(*snapshot)
+		C.SNSnapshot(cs)
 		return
 	case *list:
 		C.SNListProcesses()

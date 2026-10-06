@@ -17,8 +17,14 @@
 #include "_cgo_export.h"
 #include "dsp.h"
 
+static BOOL gDiag; // SONORA_DEBUG: log taps, gains and levels
+// SONORA_SIMULATE_NO_PERMISSION: pretend taps hear nothing and TCC has no
+// answer, to exercise the permission watchdog without touching real audio.
+static BOOL gSimulateNoPermission;
+
 NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidChange";
 NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeDidChange";
+NSNotificationName const SNEnginePermissionDidChangeNotification = @"SNEnginePermissionDidChange";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
 // video doesn't rebuild the tap (and briefly play at full volume) every time.
@@ -124,6 +130,93 @@ static NSRunningApplication *owningApp(NSString *bundleID) {
     return nil;
 }
 
+// System Audio Recording permission, via TCC's private preflight call (loaded
+// at runtime, so a future macOS without it just returns "unknown").
+typedef NS_ENUM(int, SNPermission) {
+    SNPermissionUnknown = -1,
+    SNPermissionGranted = 0,
+    SNPermissionDenied = 1,
+    SNPermissionNotAsked = 2,
+};
+
+static SNPermission audioCapturePermission(void) {
+    static int (*preflight)(CFStringRef, CFDictionaryRef);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *tcc = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_LAZY);
+        if (tcc) preflight = dlsym(tcc, "TCCAccessPreflight");
+    });
+    if (!preflight || gSimulateNoPermission) return SNPermissionUnknown;
+    int r = preflight(CFSTR("kTCCServiceAudioCapture"), NULL);
+    return r >= 0 && r <= 2 ? (SNPermission)r : SNPermissionUnknown;
+}
+
+// The outermost .app bundle containing a process's executable, if any.
+static NSString *appBundlePath(pid_t pid) {
+    char buf[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    if (proc_pidpath(pid, buf, sizeof(buf)) <= 0) return nil;
+    NSString *found = nil;
+    for (NSString *p = @(buf); p.length > 1; p = p.stringByDeletingLastPathComponent) {
+        if ([p.pathExtension isEqualToString:@"app"]) found = p;
+    }
+    return found;
+}
+
+// Name and icon for an app key, resolved once and cached: icons are costly to
+// load and the process list is rescanned every couple of seconds.
+static void identify(SNApp *app, NSRunningApplication *ra, NSString *bundleID, pid_t pid) {
+    static NSCache<NSString *, NSArray *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    NSArray *hit = [cache objectForKey:app.key];
+    if (hit) {
+        app.name = hit[0];
+        app.icon = hit[1];
+        return;
+    }
+
+    NSString *path = ra.bundleURL.path;
+    if (!path && bundleID) path = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:bundleID].path;
+    if (!path) path = appBundlePath(pid);
+    NSBundle *bundle = path ? [NSBundle bundleWithPath:path] : nil;
+
+    NSString *name = ra.localizedName ?: [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]
+                                      ?: [bundle objectForInfoDictionaryKey:@"CFBundleName"];
+    if (!name) {
+        char buf[2 * MAXCOMLEN + 1] = {0};
+        if (proc_name(pid, buf, sizeof(buf)) > 0) name = @(buf);
+    }
+    if (!name && bundleID) {
+        // e.g. "com.apple.audio.Core-Audio-Driver-Service.helper" → "Core Audio Driver Service"
+        NSSet *generic = [NSSet setWithArray:@[ @"helper", @"agent", @"service", @"extension", @"xpc", @"daemon" ]];
+        for (NSString *part in [bundleID componentsSeparatedByString:@"."].reverseObjectEnumerator) {
+            if ([generic containsObject:part.lowercaseString]) continue;
+            name = [part stringByReplacingOccurrencesOfString:@"-" withString:@" "];
+            break;
+        }
+    }
+    if (!name) name = [NSString stringWithFormat:@"System process %d", pid];
+    // Some apps carry invisible direction marks in their name (e.g. "\u200eWhatsApp").
+    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.controlCharacterSet];
+    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+
+    // Only trust real app bundles that declare an icon; anything else would
+    // give the blank-app or "exec" placeholder.
+    NSImage *icon = nil;
+    BOOL hasIcon = [bundle objectForInfoDictionaryKey:@"CFBundleIconFile"] || [bundle objectForInfoDictionaryKey:@"CFBundleIconName"];
+    if ([path.pathExtension isEqualToString:@"app"] && hasIcon) icon = [NSWorkspace.sharedWorkspace iconForFile:path];
+    if (!icon) {
+        icon = [NSImage imageWithSystemSymbolName:app.isSystem ? @"gearshape.fill" : @"app.dashed"
+                         accessibilityDescription:nil];
+    }
+    icon = [icon copy];
+    icon.size = NSMakeSize(32, 32); // a fixed point size; AppKit picks the best representation
+
+    app.name = name;
+    app.icon = icon;
+    [cache setObject:@[ name, icon ] forKey:app.key];
+}
+
 #pragma mark - Model
 
 @implementation SNApp
@@ -132,11 +225,11 @@ static NSRunningApplication *owningApp(NSString *bundleID) {
 #pragma mark - Real-time render
 
 typedef struct {
-    UInt32 tapBuffers; // the tap's buffers are the last ones in the input list
+    UInt32 tapBuffers;   // the tap's buffers are the last ones in the input list
+    _Atomic bool heard;  // any non-silent input yet (permission watchdog)
     SNDSP dsp;
 } SNRender;
 
-static BOOL gDiag;
 static double dB(double x) { return x > 1e-9 ? 20 * log10(x) : -999; }
 
 // Runs on Core Audio's real-time thread: no locks, no allocation, no ObjC.
@@ -180,6 +273,15 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     if (frames == UINT32_MAX) return;
     if (frames > SN_MAX_FRAMES) frames = SN_MAX_FRAMES;
 
+    if (srcL && !gSimulateNoPermission && !atomic_load_explicit(&r->heard, memory_order_relaxed)) {
+        for (UInt32 i = 0; i < inFrames; i++) {
+            if (srcL[i * strideL] != 0 || (srcR && srcR[i * strideR] != 0)) {
+                atomic_store_explicit(&r->heard, true, memory_order_relaxed);
+                break;
+            }
+        }
+    }
+
     // Always run the full output length so the limiter's delay line keeps moving.
     sn_dsp_process(&r->dsp, srcL, strideL, srcR, strideR, inFrames, frames);
 
@@ -204,6 +306,8 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 @property(nonatomic, copy) NSArray<NSNumber *> *processes;
 @property(nonatomic, copy) NSString *outputUID;
 @property(nonatomic, readonly) SNRender *render;
+@property(nonatomic, readonly) CFAbsoluteTime created;
+@property(nonatomic, readonly) BOOL heard;
 @end
 
 @implementation SNTap {
@@ -217,6 +321,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     if (!(self = [super init])) return nil;
     _processes = [processes copy];
     _outputUID = [outputUID copy];
+    _created = CFAbsoluteTimeGetCurrent();
     _render = calloc(1, sizeof(SNRender));
 
     _desc = [[CATapDescription alloc] initStereoMixdownOfProcesses:processes];
@@ -323,6 +428,10 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     sn_dsp_set_gain(&_render->dsp, gain);
 }
 
+- (BOOL)heard {
+    return atomic_load_explicit(&_render->heard, memory_order_relaxed);
+}
+
 - (float)gain {
     return atomic_load_explicit(&_render->dsp.target, memory_order_relaxed);
 }
@@ -363,6 +472,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSString *_outputUID;
     NSTimer *_timer;
     BOOL _refreshPending;
+    BOOL _permissionProblem;
 }
 
 + (instancetype)shared {
@@ -385,9 +495,55 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 
 - (NSArray<SNApp *> *)apps { return _apps; }
 - (NSString *)outputDeviceName { return _outputDeviceName; }
+- (BOOL)permissionProblem { return _permissionProblem; }
+
+- (void)setPermissionProblem:(BOOL)problem {
+    if (problem == _permissionProblem) return;
+    _permissionProblem = problem;
+    if (gDiag) NSLog(@"sonora[debug] permission problem: %d", problem);
+    [self apply];
+    [[NSNotificationCenter defaultCenter] postNotificationName:SNEnginePermissionDidChangeNotification object:self];
+}
+
+- (void)retryPermission {
+    [self setPermissionProblem:NO];
+}
+
+// Called every refresh. Uses TCC's answer when there is one; otherwise falls
+// back to noticing taps that never deliver any sound while their app plays.
+- (void)checkPermission {
+    SNPermission p = audioCapturePermission();
+    if (p == SNPermissionDenied) {
+        [self setPermissionProblem:YES];
+        return;
+    }
+    if (p == SNPermissionGranted && _permissionProblem) [self setPermissionProblem:NO]; // user fixed it in Settings
+
+    NSMutableSet<NSString *> *playing = [NSMutableSet new];
+    for (SNApp *app in _apps) if (app.playing) [playing addObject:app.key];
+    __weak SNEngine *weakSelf = self;
+    dispatch_async(_tapQueue, ^{
+        SNEngine *e = weakSelf;
+        if (!e) return;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        NSMutableArray<NSString *> *silent = [NSMutableArray new];
+        for (NSString *key in e->_taps) {
+            SNTap *tap = e->_taps[key];
+            if ([playing containsObject:key] && !tap.heard && now - tap.created >= 3.0) [silent addObject:key];
+        }
+        if (silent.count == 0) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // With permission granted, a silent tap is just an app playing silence.
+            if (audioCapturePermission() == SNPermissionGranted) return;
+            NSLog(@"sonora: no audio from %@; assuming System Audio Recording is not allowed", silent);
+            [weakSelf setPermissionProblem:YES];
+        });
+    });
+}
 
 - (void)start {
     __weak SNEngine *weakSelf = self;
+    gSimulateNoPermission = getenv("SONORA_SIMULATE_NO_PERMISSION") != NULL;
     if (getenv("SONORA_DEBUG")) {
         gDiag = YES;
         [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
@@ -452,13 +608,8 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             app = [SNApp new];
             app.key = key;
             app.processObjects = @[];
-            app.name = [ra.localizedName stringByTrimmingCharactersInSet:NSCharacterSet.controlCharacterSet];
-            if (!app.name) {
-                char buf[2 * MAXCOMLEN] = {0};
-                proc_name(pid, buf, sizeof(buf));
-                app.name = buf[0] ? @(buf) : (bundleID ?: key);
-            }
-            app.icon = ra.icon ?: [NSImage imageWithSystemSymbolName:@"app.dashed" accessibilityDescription:nil];
+            app.isSystem = !(ra && ra.activationPolicy == NSApplicationActivationPolicyRegular);
+            identify(app, ra, ra.bundleIdentifier ?: bundleID, ra ? ra.processIdentifier : pid);
             byKey[key] = app;
             [ordered addObject:app];
         }
@@ -509,6 +660,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     BOOL changed = ![signature(_apps) isEqualToString:signature(visible)];
     _apps = visible;
     [self apply];
+    [self checkPermission];
     if (changed) [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineAppsDidChangeNotification object:self];
 }
 
@@ -517,7 +669,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 - (void)apply {
     NSDate *now = [NSDate date];
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
-    for (SNApp *app in _apps) {
+    for (SNApp *app in _permissionProblem ? @[] : _apps) {
         float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]);
         if (gain != 1.f) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
@@ -598,8 +750,12 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 
 void SNListProcesses(void) {
     @autoreleasepool {
+        static const char *perm[] = {"granted", "denied", "not asked yet"};
+        SNPermission p = audioCapturePermission();
+        printf("System Audio Recording permission: %s\n", p == SNPermissionUnknown ? "unknown" : perm[p]);
         for (SNApp *app in [SNEngine scanApps]) {
-            printf("%-8s %-40s %s (%lu process%s)\n", app.inCall ? "CALL" : (app.playing ? "PLAYING" : "-"), app.key.UTF8String,
+            printf("%-8s %-6s %-40s %s (%lu process%s)\n", app.inCall ? "CALL" : (app.playing ? "PLAYING" : "-"),
+                   app.isSystem ? "system" : "app", app.key.UTF8String,
                    app.name.UTF8String, (unsigned long)app.processObjects.count,
                    app.processObjects.count == 1 ? "" : "es");
         }

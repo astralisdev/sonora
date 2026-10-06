@@ -1,53 +1,171 @@
 // ui.m — the menu bar item and its per-app volume sliders.
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import "engine.h"
 #include "sonora.h"
 
 static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
+static NSString *const kShowSystemSoundsKey = @"ShowSystemSounds";
+
+static BOOL reduceMotion(void) {
+    return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+}
+
+// Fades and slides a freshly shown view into place. Core Animation runs on the
+// render server, so this works while the menu is tracking the mouse.
+static void animateIn(NSView *view, NSUInteger index) {
+    if (reduceMotion() || !view.layer) return;
+    CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    fade.fromValue = @0;
+    fade.toValue = @1;
+    CABasicAnimation *slide = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+    slide.fromValue = @(-6);
+    slide.toValue = @0;
+    CAAnimationGroup *group = [CAAnimationGroup animation];
+    group.animations = @[ fade, slide ];
+    group.duration = 0.22;
+    group.beginTime = CACurrentMediaTime() + 0.025 * index;
+    group.fillMode = kCAFillModeBackwards; // stay hidden until its turn
+    group.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    [view.layer addAnimation:group forKey:@"appear"];
+}
+
+#pragma mark - Activity bars
+
+// Three little bars that bounce while an app is playing.
+@interface SNActivityView : NSView
+- (void)setPlaying:(BOOL)playing call:(BOOL)call;
+@end
+
+@implementation SNActivityView {
+    NSArray<CALayer *> *_bars;
+    BOOL _playing, _call;
+}
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    if (!(self = [super initWithFrame:frame])) return nil;
+    self.wantsLayer = YES;
+    NSMutableArray *bars = [NSMutableArray new];
+    for (int i = 0; i < 3; i++) {
+        CALayer *bar = [CALayer layer];
+        bar.anchorPoint = CGPointMake(0.5, 0);
+        bar.bounds = CGRectMake(0, 0, 2, frame.size.height);
+        bar.position = CGPointMake(1 + i * 4, 0);
+        bar.cornerRadius = 1;
+        [self.layer addSublayer:bar];
+        [bars addObject:bar];
+    }
+    _bars = bars;
+    return self;
+}
+
+- (void)setPlaying:(BOOL)playing call:(BOOL)call {
+    _playing = playing;
+    _call = call;
+    [self update];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self update];
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    [self update]; // layer animations are dropped when a view leaves its window
+}
+
+- (void)update {
+    __block CGColorRef color = NULL;
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        NSColor *c = !self->_playing ? NSColor.tertiaryLabelColor
+                     : self->_call   ? NSColor.systemGreenColor
+                                     : NSColor.controlAccentColor;
+        color = CGColorRetain(c.CGColor);
+    }];
+    static const double durations[] = {0.42, 0.55, 0.36};
+    static const double lows[] = {0.3, 0.45, 0.25};
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [_bars enumerateObjectsUsingBlock:^(CALayer *bar, NSUInteger i, BOOL *stop) {
+        bar.backgroundColor = color;
+        [bar removeAllAnimations];
+        if (!self->_playing || !self.window) {
+            bar.transform = CATransform3DMakeScale(1, 0.3, 1);
+            return;
+        }
+        bar.transform = CATransform3DIdentity;
+        if (reduceMotion()) return;
+        CABasicAnimation *bounce = [CABasicAnimation animationWithKeyPath:@"transform.scale.y"];
+        bounce.fromValue = @(lows[i]);
+        bounce.toValue = @1;
+        bounce.duration = durations[i];
+        bounce.autoreverses = YES;
+        bounce.repeatCount = HUGE_VALF;
+        bounce.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        bounce.timeOffset = durations[i] * 0.6 * i; // out of step with each other
+        [bar addAnimation:bounce forKey:@"bounce"];
+    }];
+    [CATransaction commit];
+    CGColorRelease(color);
+}
+@end
 
 #pragma mark - App row
 
 @interface SNAppRow : NSView
 @property(nonatomic, copy) NSString *key;
+@property(nonatomic) NSUInteger index; // position in the menu, for the staggered entrance
+- (instancetype)initWithApp:(SNApp *)app;
 @end
 
 @implementation SNAppRow {
     NSButton *_iconButton;
     NSTextField *_name, *_percent;
     NSSlider *_slider;
-    BOOL _muted, _inCall;
+    SNActivityView *_activity;
+    BOOL _muted;
 }
 
 - (instancetype)initWithApp:(SNApp *)app {
     if (!(self = [super initWithFrame:NSMakeRect(0, 0, kRowWidth, kRowHeight)])) return nil;
+    self.wantsLayer = YES;
     _key = app.key;
     SNEngine *engine = [SNEngine shared];
     _muted = [engine mutedForKey:app.key];
-    _inCall = app.inCall;
+    NSString *title = app.name ?: app.key;
 
     _iconButton = [NSButton buttonWithImage:app.icon target:self action:@selector(toggleMute:)];
     _iconButton.frame = NSMakeRect(14, 6, 28, 28);
     _iconButton.bordered = NO;
     _iconButton.imageScaling = NSImageScaleProportionallyUpOrDown;
     _iconButton.toolTip = @"Click to mute or unmute";
-    _iconButton.accessibilityLabel = [NSString stringWithFormat:@"Mute %@", app.name ?: app.key];
+    _iconButton.accessibilityLabel = [NSString stringWithFormat:@"Mute %@", title];
     [self addSubview:_iconButton];
 
-    NSString *title = app.name ?: app.key;
-    _name = [NSTextField labelWithString:_inCall ? [title stringByAppendingString:@"  ·  in call"] : title];
-    _name.frame = NSMakeRect(50, 22, 180, 15);
-    _name.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    NSString *label = app.inCall ? [title stringByAppendingString:@"  ·  in call"] : title;
+    NSFont *nameFont = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    _name = [NSTextField labelWithString:label];
+    _name.font = nameFont;
     _name.lineBreakMode = NSLineBreakByTruncatingTail;
+    // Measure the text itself (+4 pt for the cell's padding); a truncating
+    // label's intrinsic size isn't reliable.
+    CGFloat nameWidth = MIN(ceil([label sizeWithAttributes:@{NSFontAttributeName : nameFont}].width) + 4, 176);
+    _name.frame = NSMakeRect(50, 22, nameWidth, 15);
     [self addSubview:_name];
+
+    _activity = [[SNActivityView alloc] initWithFrame:NSMakeRect(50 + nameWidth + 6, 25, 10, 9)];
+    [_activity setPlaying:app.playing call:app.inCall];
+    [self addSubview:_activity];
 
     _slider = [NSSlider sliderWithValue:[engine volumeForKey:app.key] minValue:0 maxValue:kMaxVolume
                                  target:self action:@selector(sliderMoved:)];
     _slider.frame = NSMakeRect(48, 3, 196, 20);
     _slider.controlSize = NSControlSizeSmall;
     _slider.continuous = YES;
-    _slider.accessibilityLabel = [NSString stringWithFormat:@"%@ volume", app.name ?: app.key];
+    _slider.accessibilityLabel = [NSString stringWithFormat:@"%@ volume", title];
     [self addSubview:_slider];
 
     _percent = [NSTextField labelWithString:@""];
@@ -56,29 +174,77 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
     _percent.alignment = NSTextAlignmentRight;
     [self addSubview:_percent];
 
-    [self updateLabels];
+    [self updateLabelsAnimated:NO];
     return self;
 }
 
-- (void)updateLabels {
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (self.window) animateIn(self, _index);
+}
+
+- (void)updateLabelsAnimated:(BOOL)animated {
     _percent.stringValue = _muted ? @"Muted" : [NSString stringWithFormat:@"%d%%", (int)lround(_slider.doubleValue)];
     _percent.textColor = _muted ? NSColor.secondaryLabelColor : NSColor.labelColor;
-    _iconButton.alphaValue = _muted ? 0.35 : 1.0;
     _slider.enabled = !_muted;
+    CGFloat alpha = _muted ? 0.35 : 1.0;
+    if (animated && !reduceMotion()) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.18;
+            self->_iconButton.animator.alphaValue = alpha;
+        }];
+    } else {
+        _iconButton.alphaValue = alpha;
+    }
 }
 
 - (void)sliderMoved:(NSSlider *)slider {
     double v = round(slider.doubleValue);
     if (fabs(v - 100) < 3) v = 100; // snap to the "untouched" level
     slider.doubleValue = v;
-    [self updateLabels];
+    [self updateLabelsAnimated:NO];
     [[SNEngine shared] setVolume:v muted:_muted forKey:_key];
 }
 
 - (void)toggleMute:(id)sender {
     _muted = !_muted;
-    [self updateLabels];
+    [self updateLabelsAnimated:YES];
     [[SNEngine shared] setVolume:round(_slider.doubleValue) muted:_muted forKey:_key];
+}
+@end
+
+#pragma mark - Permission banner
+
+@interface SNBannerView : NSView
+@end
+
+@implementation SNBannerView
+- (instancetype)init {
+    if (!(self = [super initWithFrame:NSMakeRect(0, 0, kRowWidth, 56)])) return nil;
+    self.wantsLayer = YES;
+    NSImageView *icon = [NSImageView imageViewWithImage:
+        [NSImage imageWithSystemSymbolName:@"exclamationmark.triangle.fill" accessibilityDescription:@"Warning"]];
+    icon.contentTintColor = NSColor.systemOrangeColor;
+    icon.frame = NSMakeRect(16, 18, 22, 20);
+    [self addSubview:icon];
+
+    NSTextField *title = [NSTextField labelWithString:@"Sonora can't hear your apps"];
+    title.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+    title.frame = NSMakeRect(48, 34, 240, 16);
+    [self addSubview:title];
+
+    NSTextField *detail = [NSTextField wrappingLabelWithString:
+        @"Allow System Audio Recording for Sonora. Volumes are paused until then."];
+    detail.font = [NSFont systemFontOfSize:10];
+    detail.textColor = NSColor.secondaryLabelColor;
+    detail.frame = NSMakeRect(48, 4, 240, 30);
+    [self addSubview:detail];
+    return self;
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (self.window) animateIn(self, 0);
 }
 @end
 
@@ -101,9 +267,7 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     _statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
-    NSImage *image = [NSImage imageWithSystemSymbolName:@"slider.vertical.3" accessibilityDescription:@"Sonora"];
-    image.template = YES;
-    _statusItem.button.image = image;
+    [self updateStatusIcon];
     _statusItem.button.toolTip = @"Sonora — per-app volume";
 
     _menu = [NSMenu new];
@@ -111,16 +275,24 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
     _menu.autoenablesItems = NO;
     _statusItem.menu = _menu;
 
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appsChanged:)
-                                                 name:SNEngineAppsDidChangeNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(volumeChanged:)
-                                                 name:SNEngineVolumeDidChangeNotification object:nil];
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    [nc addObserver:self selector:@selector(appsChanged:) name:SNEngineAppsDidChangeNotification object:nil];
+    [nc addObserver:self selector:@selector(volumeChanged:) name:SNEngineVolumeDidChangeNotification object:nil];
+    [nc addObserver:self selector:@selector(permissionChanged:) name:SNEnginePermissionDidChangeNotification object:nil];
     [[SNEngine shared] start];
     [self announce:@"SONORA"];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)note {
     [[SNEngine shared] shutdown];
+}
+
+- (void)updateStatusIcon {
+    BOOL problem = [SNEngine shared].permissionProblem;
+    NSImage *image = [NSImage imageWithSystemSymbolName:problem ? @"exclamationmark.triangle" : @"slider.vertical.3"
+                               accessibilityDescription:@"Sonora"];
+    image.template = YES;
+    _statusItem.button.image = image;
 }
 
 - (void)menuNeedsUpdate:(NSMenu *)menu { [self rebuildMenu]; }
@@ -136,6 +308,12 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
         return;
     }
     [self rebuildMenu];
+}
+
+- (void)permissionChanged:(NSNotification *)note {
+    [self updateStatusIcon];
+    if ([SNEngine shared].permissionProblem) [self announce:@"NO PERMISSION"];
+    [self appsChanged:note];
 }
 
 #pragma mark - Deciphering title
@@ -167,11 +345,12 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     [_clearTimer invalidate];
     _clearTimer = nil;
 
-    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+    if (reduceMotion()) {
         [self setTitleText:text];
     } else if (!_scrambleTimer) {
         __weak SNAppDelegate *weakSelf = self;
-        _scrambleTimer = [NSTimer scheduledTimerWithTimeInterval:0.035 repeats:YES block:^(NSTimer *t) { [weakSelf tick]; }];
+        _scrambleTimer = [NSTimer timerWithTimeInterval:0.035 repeats:YES block:^(NSTimer *t) { [weakSelf tick]; }];
+        [NSRunLoop.mainRunLoop addTimer:_scrambleTimer forMode:NSRunLoopCommonModes]; // keeps going while the menu is open
         [self tick];
     }
     if (!_scrambleTimer) [self scheduleClear];
@@ -200,11 +379,12 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 
 - (void)scheduleClear {
     __weak SNAppDelegate *weakSelf = self;
-    _clearTimer = [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:NO block:^(NSTimer *t) {
+    _clearTimer = [NSTimer timerWithTimeInterval:2.5 repeats:NO block:^(NSTimer *t) {
         SNAppDelegate *strongSelf = weakSelf;
         [strongSelf setTitleText:@""];
         strongSelf->_clearTimer = nil;
     }];
+    [NSRunLoop.mainRunLoop addTimer:_clearTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)setTitleText:(NSString *)text {
@@ -221,31 +401,49 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     _statusItem.length = NSVariableStatusItemLength;
 }
 
-- (NSMenuItem *)header:(NSString *)title {
-    NSMenuItem *item = [NSMenuItem sectionHeaderWithTitle:title];
-    return item;
-}
+#pragma mark - Menu
 
 - (void)rebuildMenu {
     [_menu removeAllItems];
     SNEngine *engine = [SNEngine shared];
 
     NSString *output = engine.outputDeviceName;
-    [_menu addItem:[self header:output ? [@"Output: " stringByAppendingString:output] : @"Sonora"]];
+    [_menu addItem:[NSMenuItem sectionHeaderWithTitle:output ? [@"Output: " stringByAppendingString:output] : @"Sonora"]];
 
-    if (engine.apps.count == 0) {
+    if (engine.permissionProblem) {
+        NSMenuItem *banner = [NSMenuItem new];
+        banner.view = [SNBannerView new];
+        [_menu addItem:banner];
+        [self addItem:@"Open Privacy Settings…" action:@selector(openPrivacySettings:) key:@""];
+        [self addItem:@"Try Again" action:@selector(retryPermission:) key:@""];
+        [_menu addItem:NSMenuItem.separatorItem];
+    }
+
+    BOOL showSystem = [NSUserDefaults.standardUserDefaults boolForKey:kShowSystemSoundsKey];
+    NSMutableArray<SNApp *> *apps = [NSMutableArray new], *system = [NSMutableArray new];
+    for (SNApp *app in engine.apps) [(app.isSystem ? system : apps) addObject:app];
+
+    NSUInteger index = 0;
+    if (apps.count == 0) {
         NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"No apps are playing audio" action:nil keyEquivalent:@""];
         empty.enabled = NO;
         [_menu addItem:empty];
     }
-    for (SNApp *app in engine.apps) {
-        NSMenuItem *item = [NSMenuItem new];
-        item.view = [[SNAppRow alloc] initWithApp:app];
-        [_menu addItem:item];
+    for (SNApp *app in apps) [self addRow:app index:index++];
+
+    if (showSystem && system.count) {
+        [_menu addItem:[NSMenuItem sectionHeaderWithTitle:@"System Sounds"]];
+        for (SNApp *app in system) [self addRow:app index:index++];
     }
 
     [_menu addItem:NSMenuItem.separatorItem];
     [self addItem:@"Reset All to 100%" action:@selector(resetAll:) key:@""];
+
+    NSString *systemTitle = system.count && !showSystem
+        ? [NSString stringWithFormat:@"Show System Sounds (%lu)", (unsigned long)system.count]
+        : @"Show System Sounds";
+    NSMenuItem *systemItem = [self addItem:systemTitle action:@selector(toggleSystemSounds:) key:@""];
+    systemItem.state = showSystem ? NSControlStateValueOn : NSControlStateValueOff;
 
     NSMenuItem *login = [self addItem:@"Launch at Login" action:@selector(toggleLogin:) key:@""];
     login.state = SMAppService.mainAppService.status == SMAppServiceStatusEnabled ? NSControlStateValueOn : NSControlStateValueOff;
@@ -253,6 +451,14 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     [self addItem:@"Sonora on GitHub" action:@selector(openGitHub:) key:@""];
     [_menu addItem:NSMenuItem.separatorItem];
     [self addItem:@"Quit Sonora" action:@selector(quit:) key:@"q"];
+}
+
+- (void)addRow:(SNApp *)app index:(NSUInteger)index {
+    SNAppRow *row = [[SNAppRow alloc] initWithApp:app];
+    row.index = index;
+    NSMenuItem *item = [NSMenuItem new];
+    item.view = row;
+    [_menu addItem:item];
 }
 
 - (NSMenuItem *)addItem:(NSString *)title action:(SEL)action key:(NSString *)key {
@@ -263,6 +469,18 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 }
 
 - (void)resetAll:(id)sender { [[SNEngine shared] resetAll]; }
+
+- (void)toggleSystemSounds:(id)sender {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    [d setBool:![d boolForKey:kShowSystemSoundsKey] forKey:kShowSystemSoundsKey];
+}
+
+- (void)openPrivacySettings:(id)sender {
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
+        @"x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture"]];
+}
+
+- (void)retryPermission:(id)sender { [[SNEngine shared] retryPermission]; }
 
 - (void)toggleLogin:(id)sender {
     SMAppService *svc = SMAppService.mainAppService;
@@ -292,5 +510,27 @@ void SNRun(void) {
         delegate = [SNAppDelegate new];
         app.delegate = delegate;
         [app run];
+    }
+}
+
+void SNSnapshot(const char *path) {
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        NSArray<SNApp *> *apps = [SNEngine scanApps];
+        SNBannerView *banner = [SNBannerView new];
+        CGFloat top = banner.frame.size.height;
+        NSView *stack = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kRowWidth, kRowHeight * apps.count + top)];
+        stack.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+        banner.frameOrigin = NSMakePoint(0, kRowHeight * apps.count);
+        [stack addSubview:banner];
+        [apps enumerateObjectsUsingBlock:^(SNApp *app, NSUInteger i, BOOL *stop) {
+            SNAppRow *row = [[SNAppRow alloc] initWithApp:app];
+            row.frameOrigin = NSMakePoint(0, kRowHeight * (apps.count - 1 - i));
+            [stack addSubview:row];
+        }];
+        NSBitmapImageRep *rep = [stack bitmapImageRepForCachingDisplayInRect:stack.bounds];
+        [stack cacheDisplayInRect:stack.bounds toBitmapImageRep:rep];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(path) atomically:YES];
+        printf("wrote %lu rows to %s\n", (unsigned long)apps.count, path);
     }
 }
