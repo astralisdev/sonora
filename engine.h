@@ -7,8 +7,8 @@ extern NSNotificationName const SNEngineAppsDidChangeNotification;
 extern NSNotificationName const SNEngineVolumeDidChangeNotification;
 // Posted when permissionProblem changes.
 extern NSNotificationName const SNEnginePermissionDidChangeNotification;
-// Posted when a call starts and other apps begin fading down.
-extern NSNotificationName const SNEngineCallDuckingDidStartNotification;
+// Posted when an app starts a call. userInfo: key, name.
+extern NSNotificationName const SNEngineCallDidStartNotification;
 
 // One user-facing app, possibly made of several audio processes (e.g. a browser
 // and its helper processes all count as the browser).
@@ -21,6 +21,14 @@ extern NSNotificationName const SNEngineCallDuckingDidStartNotification;
 @property(nonatomic) BOOL inCall;              // running Apple voice processing (a call)
 @property(nonatomic) BOOL isSystem;            // background/system process rather than a regular app
 @end
+
+// System Audio Recording permission as macOS reports it.
+typedef NS_ENUM(int, SNPermission) {
+    SNPermissionUnknown = -1, // macOS gave no answer (private API missing)
+    SNPermissionGranted = 0,
+    SNPermissionDenied = 1,
+    SNPermissionNotAsked = 2,
+};
 
 @interface SNEngine : NSObject
 + (instancetype)shared;
@@ -35,6 +43,11 @@ extern NSNotificationName const SNEngineCallDuckingDidStartNotification;
 // app is left muted.
 @property(nonatomic, readonly) BOOL permissionProblem;
 - (void)retryPermission;
+
+@property(nonatomic, readonly) SNPermission permission;
+// Makes macOS show its System Audio Recording prompt now, by briefly reading
+// a listen-only tap, instead of when the user first moves a slider.
+- (void)requestPermission;
 
 // YES while an app is in a call (running Apple voice processing).
 @property(nonatomic, readonly) BOOL callActive;

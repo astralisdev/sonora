@@ -22,7 +22,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 - One slider per app that is playing audio, from 0% to 150% (boost).
 - Click an app's icon to mute it.
 - Volumes are remembered per app and re-applied whenever it plays again.
-- **During calls**, other apps fade down automatically (by 12 dB by default; a little, a lot, mute, or off), and fade back when the call ends. This stops speaker music from leaking into your microphone: call apps' echo cancellers remove speech well but music poorly. During a call the menu also offers **Filter Music Out of Your Mic…**, which explains how to turn on macOS's *Voice Isolation* mic mode (the green camera icon in the menu bar during a call → Mic Mode), the strongest mic filter available. macOS doesn't let one app change another app's mic mode, so Sonora can't switch it for you.
+- **During calls**, other apps fade down automatically (by 12 dB by default; a little, a lot, mute, or off), and fade back when the call ends. The first time each app starts a call, a small tip under the menu bar icon suggests macOS's *Voice Isolation* mic mode and shows how to turn it on. This stops speaker music from leaking into your microphone: call apps' echo cancellers remove speech well but music poorly. During a call the menu also offers **Filter Music Out of Your Mic…**, which explains how to turn on macOS's *Voice Isolation* mic mode (the green camera icon in the menu bar during a call → Mic Mode), the strongest mic filter available. macOS doesn't let one app change another app's mic mode, so Sonora can't switch it for you.
 - Browser and app helper processes are grouped under the app you know (Chrome, Safari, WhatsApp…).
 - No audio driver or kernel extension to install, and no virtual device to pick. It works with whatever output you're using, including AirPods, and follows output changes automatically.
 - Apps you leave at 100% are not touched at all.
@@ -54,6 +54,8 @@ make install      # builds Sonora.app, copies it to /Applications and launches i
 Other targets: `make app` (build only, into `build/`), `make run`, `make test`, `make universal` (arm64 + x86_64), `make zip`.
 
 `make` signs the app with your first *Developer ID* or *Apple Development* certificate if you have one, so macOS remembers the permission below across rebuilds; with no certificate it falls back to an ad-hoc signature, and macOS asks again after every rebuild.
+
+On first launch Sonora opens a short welcome window. It asks for the audio permission up front, offers to open at login, and then shows you the menu. You can reopen it from **Setup Guide…** in the menu.
 
 The first time you change an app's volume, macOS asks for permission to capture **system audio**. Allow it (System Settings → Privacy & Security → Screen & System Audio Recording → *System Audio Recording Only*). Sonora needs it to read the app's audio and play it back at the new level. Nothing is recorded or sent anywhere.
 
@@ -105,6 +107,7 @@ Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceili
 ./build/Sonora.app/Contents/MacOS/Sonora -calibrate net.whatsapp.WhatsApp   # tune callBoostDB during a call
 SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains, levels and dropouts
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot rows.png   # renders a menu row for every audio process
+./build/Sonora.app/Contents/MacOS/Sonora -snapshot-welcome welcome.png   # renders the welcome window
 SONORA_SIMULATE_NO_PERMISSION=1 ./build/Sonora.app/Contents/MacOS/Sonora  # exercises the permission watchdog
 ```
 

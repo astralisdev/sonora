@@ -14,4 +14,7 @@ void SNCalibrate(const char *bundleID);
 // Debug: renders a menu row for every audio process (apps and system) to a PNG.
 void SNSnapshot(const char *path);
 
+// Debug: renders the welcome window to a PNG.
+void SNSnapshotWelcome(const char *path);
+
 #endif

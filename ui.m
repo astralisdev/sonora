@@ -4,6 +4,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import "engine.h"
+#import "welcome.h"
 #include "sonora.h"
 
 static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
@@ -262,6 +263,8 @@ static void animateIn(NSView *view, NSUInteger index) {
     NSString *_text;          // text we're deciphering towards
     NSMutableArray<NSNumber *> *_reveal; // frame at which each character becomes final
     NSInteger _frame;
+
+    NSPopover *_callTip;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
@@ -278,9 +281,21 @@ static void animateIn(NSView *view, NSUInteger index) {
     [nc addObserver:self selector:@selector(appsChanged:) name:SNEngineAppsDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(volumeChanged:) name:SNEngineVolumeDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(permissionChanged:) name:SNEnginePermissionDidChangeNotification object:nil];
-    [nc addObserver:self selector:@selector(callStarted:) name:SNEngineCallDuckingDidStartNotification object:nil];
+    [nc addObserver:self selector:@selector(callStarted:) name:SNEngineCallDidStartNotification object:nil];
     [[SNEngine shared] start];
     [self announce:@"SONORA"];
+    if (SNWelcomeController.needsWelcome) [self showWelcome:nil];
+}
+
+- (void)showWelcome:(id)sender {
+    __weak SNAppDelegate *weakSelf = self;
+    [[SNWelcomeController shared] showWithCompletion:^{
+        // Open the menu once so a new user sees where Sonora lives.
+        SNAppDelegate *d = weakSelf;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            [d->_statusItem.button performClick:nil];
+        });
+    }];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)note {
@@ -318,6 +333,70 @@ static void animateIn(NSView *view, NSUInteger index) {
 
 - (void)callStarted:(NSNotification *)note {
     [self announce:@"CALL MODE"];
+    [self showCallTipFor:note.userInfo[@"key"] name:note.userInfo[@"name"]];
+}
+
+#pragma mark - Call tip
+
+// Once per call app: a small bubble under the menu bar icon suggesting Voice
+// Isolation, which most people never find on their own.
+- (void)showCallTipFor:(NSString *)key name:(NSString *)name {
+    NSString *shownKey = [@"VoiceIsolationTipShown." stringByAppendingString:key ?: @"?"];
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    if ([d boolForKey:shownKey] || _menuOpen || !_statusItem.button.window) return;
+    [d setBool:YES forKey:shownKey];
+
+    NSImageView *icon = [NSImageView imageViewWithImage:
+        [NSImage imageWithSystemSymbolName:@"mic.badge.plus" accessibilityDescription:nil]];
+    icon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:20 weight:NSFontWeightMedium];
+    icon.contentTintColor = NSColor.systemGreenColor;
+
+    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"On a call with %@?", name]];
+    title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    NSTextField *body = [NSTextField wrappingLabelWithString:
+        @"Turn on Voice Isolation so they hear only your voice, not your music or the room."];
+    body.font = [NSFont systemFontOfSize:11.5];
+    body.textColor = NSColor.secondaryLabelColor;
+    [body.widthAnchor constraintEqualToConstant:230].active = YES;
+
+    NSButton *how = [NSButton buttonWithTitle:@"Show Me How" target:self action:@selector(callTipShowHow:)];
+    how.keyEquivalent = @"\r";
+    NSButton *later = [NSButton buttonWithTitle:@"Not Now" target:self action:@selector(callTipDismiss:)];
+    NSStackView *buttons = [NSStackView stackViewWithViews:@[ later, how ]];
+
+    NSStackView *text = [NSStackView stackViewWithViews:@[ title, body, buttons ]];
+    text.orientation = NSUserInterfaceLayoutOrientationVertical;
+    text.alignment = NSLayoutAttributeLeading;
+    text.spacing = 6;
+    [text setCustomSpacing:12 afterView:body];
+    NSStackView *content = [NSStackView stackViewWithViews:@[ icon, text ]];
+    content.alignment = NSLayoutAttributeTop;
+    content.spacing = 12;
+    content.edgeInsets = NSEdgeInsetsMake(14, 14, 14, 16);
+
+    NSViewController *vc = [NSViewController new];
+    vc.view = content;
+    NSPopover *popover = [NSPopover new];
+    popover.contentViewController = vc;
+    popover.behavior = NSPopoverBehaviorApplicationDefined; // stays put; the call app keeps focus
+    popover.animates = !reduceMotion();
+    [_callTip close];
+    _callTip = popover;
+    [popover showRelativeToRect:_statusItem.button.bounds ofView:_statusItem.button preferredEdge:NSRectEdgeMinY];
+
+    __weak NSPopover *weakPopover = popover;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [weakPopover close];
+    });
+}
+
+- (void)callTipShowHow:(id)sender {
+    [_callTip close];
+    [self explainVoiceIsolation:nil];
+}
+
+- (void)callTipDismiss:(id)sender {
+    [_callTip close];
 }
 
 #pragma mark - Deciphering title
@@ -466,6 +545,7 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     NSMenuItem *login = [self addItem:@"Launch at Login" action:@selector(toggleLogin:) key:@""];
     login.state = SMAppService.mainAppService.status == SMAppServiceStatusEnabled ? NSControlStateValueOn : NSControlStateValueOff;
 
+    [self addItem:@"Setup Guide…" action:@selector(showWelcome:) key:@""];
     [self addItem:@"Sonora on GitHub" action:@selector(openGitHub:) key:@""];
     [_menu addItem:NSMenuItem.separatorItem];
     [self addItem:@"Quit Sonora" action:@selector(quit:) key:@"q"];

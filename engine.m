@@ -25,7 +25,7 @@ static BOOL gSimulateNoPermission;
 NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidChange";
 NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeDidChange";
 NSNotificationName const SNEnginePermissionDidChangeNotification = @"SNEnginePermissionDidChange";
-NSNotificationName const SNEngineCallDuckingDidStartNotification = @"SNEngineCallDuckingDidStart";
+NSNotificationName const SNEngineCallDidStartNotification = @"SNEngineCallDidStart";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
 // video doesn't rebuild the tap (and briefly play at full volume) every time.
@@ -133,13 +133,6 @@ static NSRunningApplication *owningApp(NSString *bundleID) {
 
 // System Audio Recording permission, via TCC's private preflight call (loaded
 // at runtime, so a future macOS without it just returns "unknown").
-typedef NS_ENUM(int, SNPermission) {
-    SNPermissionUnknown = -1,
-    SNPermissionGranted = 0,
-    SNPermissionDenied = 1,
-    SNPermissionNotAsked = 2,
-};
-
 static SNPermission audioCapturePermission(void) {
     static int (*preflight)(CFStringRef, CFDictionaryRef);
     static dispatch_once_t once;
@@ -484,6 +477,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSTimer *_timer;
     BOOL _refreshPending;
     BOOL _permissionProblem;
+    BOOL _callWasActive;
     float _duck;          // current extra gain for non-call apps while a call is active (1 = none)
     NSTimer *_duckTimer;  // fades _duck towards its target
 }
@@ -521,6 +515,45 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 
 - (void)retryPermission {
     [self setPermissionProblem:NO];
+}
+
+- (SNPermission)permission { return audioCapturePermission(); }
+
+- (void)requestPermission {
+    dispatch_async(_tapQueue, ^{
+        // A listen-only tap of everything: nothing is muted or changed, but
+        // starting it is what makes macOS ask.
+        CATapDescription *desc = [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
+        desc.privateTap = YES;
+        desc.muteBehavior = CATapUnmuted;
+        AudioObjectID tap = 0, agg = 0;
+        AudioDeviceIOProcID proc = NULL;
+        if (AudioHardwareCreateProcessTap(desc, &tap) != noErr) return;
+        NSString *uid = readString(defaultOutputDevice(), kAudioDevicePropertyDeviceUID);
+        NSDictionary *aggDesc = @{
+            @kAudioAggregateDeviceNameKey : @"Sonora permission check",
+            @kAudioAggregateDeviceUIDKey : [@"sonora-permission-" stringByAppendingString:[NSUUID UUID].UUIDString],
+            @kAudioAggregateDeviceMainSubDeviceKey : uid ?: @"",
+            @kAudioAggregateDeviceIsPrivateKey : @YES,
+            @kAudioAggregateDeviceTapAutoStartKey : @YES,
+            @kAudioAggregateDeviceSubDeviceListKey : uid ? @[ @{@kAudioSubDeviceUIDKey : uid} ] : @[],
+            @kAudioAggregateDeviceTapListKey : @[ @{@kAudioSubTapUIDKey : desc.UUID.UUIDString} ],
+        };
+        if (uid && AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggDesc, &agg) == noErr &&
+            AudioDeviceCreateIOProcIDWithBlock(&proc, agg, NULL,
+                ^(const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
+                  AudioBufferList *out, const AudioTimeStamp *outTime) {
+                    for (UInt32 b = 0; b < out->mNumberBuffers; b++)
+                        if (out->mBuffers[b].mData) memset(out->mBuffers[b].mData, 0, out->mBuffers[b].mDataByteSize);
+                }) == noErr) {
+            AudioDeviceStart(agg, proc);
+            [NSThread sleepForTimeInterval:1.0];
+            AudioDeviceStop(agg, proc);
+            AudioDeviceDestroyIOProcID(agg, proc);
+        }
+        if (agg) AudioHardwareDestroyAggregateDevice(agg);
+        AudioHardwareDestroyProcessTap(tap);
+    });
 }
 
 // Called every refresh. Uses TCC's answer when there is one; otherwise falls
@@ -679,6 +712,13 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     };
     BOOL changed = ![signature(_apps) isEqualToString:signature(visible)];
     _apps = visible;
+    SNApp *caller = nil;
+    for (SNApp *app in visible) if (app.inCall) caller = app;
+    if (caller && !_callWasActive) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineCallDidStartNotification object:self
+            userInfo:@{@"key" : caller.key, @"name" : caller.name ?: caller.key}];
+    }
+    _callWasActive = caller != nil;
     [self updateDuck];
     [self apply];
     [self checkPermission];
@@ -777,9 +817,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         [e apply];
     }];
     [NSRunLoop.mainRunLoop addTimer:_duckTimer forMode:NSRunLoopCommonModes];
-    if (target < 1 && _duck == 1) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineCallDuckingDidStartNotification object:self];
-    }
 }
 
 - (double)volumeForKey:(NSString *)key {
