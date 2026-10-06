@@ -878,10 +878,15 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         }
         float gain = sn_gain_for_percent(volume, [self mutedForKey:app.settingsKey]);
         if (!app.inCall) gain *= _duck; // lowered while a call is going on
-        if (gain != 1.f || level) _lastNonUnity[app.key] = now;
+        // During a call macOS turns other apps down on its own (part of the call's
+        // voice processing). Audio Sonora plays isn't affected, so carrying the
+        // other apps through Sonora keeps them as loud as outside the call, and
+        // the During Calls setting becomes the real amount they're lowered by.
+        BOOL carry = self.callActive && !app.inCall && app.playing;
+        if (gain != 1.f || level || carry) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
-        if (gain == 1.f && !level && !holding) continue;
+        if (gain == 1.f && !level && !carry && !holding) continue;
         wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain), @"level" : @(level)};
     }
     [self reconcile:wanted outputUID:_outputUID];
