@@ -160,8 +160,11 @@ static void animateIn(NSView *view, NSUInteger index) {
     [_activity setPlaying:app.playing call:app.inCall];
     [self addSubview:_activity];
 
-    _slider = [NSSlider sliderWithValue:[engine volumeForKey:_key] minValue:0 maxValue:kMaxVolume
+    // A call can't be made louder than the call app itself, so its slider stops at 100%.
+    double maxVolume = app.inCall ? 100 : kMaxVolume;
+    _slider = [NSSlider sliderWithValue:fmin([engine volumeForKey:_key], maxVolume) minValue:0 maxValue:maxVolume
                                  target:self action:@selector(sliderMoved:)];
+    if (app.inCall) _slider.toolTip = @"100% is the call exactly as the app plays it. Slide left to turn it down.";
     _slider.frame = NSMakeRect(48, 3, 196, 20);
     _slider.controlSize = NSControlSizeSmall;
     _slider.continuous = YES;
@@ -549,8 +552,8 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     NSMenuItem *even = [[NSMenuItem alloc] initWithTitle:@"Even Out Voices" action:@selector(toggleEvenOutVoices:) keyEquivalent:@""];
     even.target = self;
     even.state = engine.evenOutVoices ? NSControlStateValueOn : NSControlStateValueOff;
-    even.toolTip = @"Keeps everyone in the call at the same comfortable loudness, even when people "
-                   @"join or leave, speak softly, or are on a bad connection.";
+    even.toolTip = @"Keeps everyone in the call at the same loudness, even when people join or leave "
+                   @"or speak softly. Can be quieter than the call app's own sound.";
     [duckMenu addItem:even];
     duckItem.submenu = duckMenu;
     [_menu addItem:duckItem];

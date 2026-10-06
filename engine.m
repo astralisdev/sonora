@@ -44,8 +44,8 @@ static const NSTimeInterval kUnityHold = 3.0;
 static const UInt32 kIOBufferFrames = 128;
 
 // Speech loudness that voice leveling aims for at 100% call volume (dBFS RMS,
-// roughly the level of a podcast). The call slider moves it up or down.
-static const float kVoiceLevelDB = -18;
+// a little louder than a typical podcast). The call slider moves it down.
+static const float kVoiceLevelDB = -16;
 
 #pragma mark - Core Audio helpers
 
@@ -865,10 +865,22 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             [_lastNonUnity removeObjectForKey:app.key];
             continue;
         }
-        float gain = sn_gain_for_percent([self volumeForKey:app.settingsKey], [self mutedForKey:app.settingsKey]);
+        double volume = [self volumeForKey:app.settingsKey];
+        BOOL level = NO;
+        if (app.inCall) {
+            // The call app's own sound is the ceiling: macOS can make call audio
+            // louder after the point where taps read it, so a replayed call can
+            // only match it at best. At 100% the call is left untouched (native
+            // loudness, no delay); lower settings turn it down from there.
+            volume = fmin(volume, 100);
+            level = snEvenOutVoices(); // opt-in: leveling needs the tap
+            if (volume >= 100 && ![self mutedForKey:app.settingsKey] && !level) {
+                [_lastNonUnity removeObjectForKey:app.key];
+                continue;
+            }
+        }
+        float gain = sn_gain_for_percent(volume, [self mutedForKey:app.settingsKey]);
         if (!app.inCall) gain *= _duck; // lowered while a call is going on
-        // Calls go through voice leveling, which needs the tap even at 100%.
-        BOOL level = app.inCall && snEvenOutVoices();
         if (gain != 1.f || level) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;

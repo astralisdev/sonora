@@ -181,7 +181,7 @@ func snSetCallDuckDB(dB C.double) {
 func snEvenOutVoices() C.bool {
 	settings.mu.Lock()
 	defer settings.mu.Unlock()
-	return C.bool(settings.even == nil || *settings.even)
+	return C.bool(settings.even != nil && *settings.even) // off unless chosen
 }
 
 //export snSetEvenOutVoices
