@@ -32,6 +32,7 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
     _iconButton.bordered = NO;
     _iconButton.imageScaling = NSImageScaleProportionallyUpOrDown;
     _iconButton.toolTip = @"Click to mute or unmute";
+    _iconButton.accessibilityLabel = [NSString stringWithFormat:@"Mute %@", app.name ?: app.key];
     [self addSubview:_iconButton];
 
     _name = [NSTextField labelWithString:app.name ?: app.key];
@@ -45,6 +46,7 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
     _slider.frame = NSMakeRect(48, 3, 196, 20);
     _slider.controlSize = NSControlSizeSmall;
     _slider.continuous = YES;
+    _slider.accessibilityLabel = [NSString stringWithFormat:@"%@ volume", app.name ?: app.key];
     [self addSubview:_slider];
 
     _percent = [NSTextField labelWithString:@""];
@@ -136,7 +138,14 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
 - (void)menuDidClose:(NSMenu *)menu { _menuOpen = NO; }
 
 - (void)appsChanged:(NSNotification *)note {
-    if (_menuOpen) [self rebuildMenu]; // an app started or stopped while the menu is showing
+    // An app started or stopped while the menu is showing. Rebuilding would
+    // cancel a slider drag in progress, so wait until the mouse is released.
+    if (!_menuOpen) return;
+    if (NSEvent.pressedMouseButtons != 0) {
+        [self performSelector:@selector(appsChanged:) withObject:note afterDelay:0.3 inModes:@[NSRunLoopCommonModes]];
+        return;
+    }
+    [self rebuildMenu];
 }
 
 #pragma mark - Deciphering title

@@ -7,6 +7,7 @@ import "C"
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -57,8 +58,12 @@ func (s *store) load() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if file.Apps != nil {
-		s.apps = file.Apps
+	for k, a := range file.Apps {
+		if math.IsNaN(a.Volume) {
+			continue
+		}
+		a.Volume = math.Max(0, math.Min(a.Volume, 150))
+		s.apps[k] = a
 	}
 	return nil
 }

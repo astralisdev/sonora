@@ -5,7 +5,7 @@
 //      mutes the app's own output while Sonora is reading from it, and
 //   2. a private aggregate device made of the current output device plus
 //      that tap, whose IOProc copies the tapped audio to the output scaled
-//      by the app's gain.
+//      by the app's gain and passed through a look-ahead peak limiter.
 // Apps at 100% are left untouched, so Sonora adds no latency to them.
 
 #import "engine.h"
@@ -15,13 +15,18 @@
 #include <libproc.h>
 #include <stdatomic.h>
 #include "_cgo_export.h"
+#include "dsp.h"
 
 NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidChange";
 NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeDidChange";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
-// video doesn't rebuild the tap every time.
-static const NSTimeInterval kTapGracePeriod = 8.0;
+// video doesn't rebuild the tap (and briefly play at full volume) every time.
+static const NSTimeInterval kTapGracePeriod = 30.0;
+
+// How long a tap is kept after its volume returns to 100%, so dragging a
+// slider across 100% doesn't tear the tap down and rebuild it.
+static const NSTimeInterval kUnityHold = 15.0;
 
 #pragma mark - Core Audio helpers
 
@@ -89,18 +94,6 @@ static NSRunningApplication *owningApp(NSString *bundleID) {
     return nil;
 }
 
-// Slider percent → linear gain. Below 100% it follows a squared curve (50% is
-// about -12 dB, which sounds close to half as loud). Above 100% it boosts in
-// even dB steps up to +6 dB at 150%, so the top of the slider isn't a cliff.
-static float gainFor(double percent, BOOL muted) {
-    if (muted) return 0;
-    if (percent <= 100) {
-        double x = percent / 100.0;
-        return (float)(x * x);
-    }
-    return (float)pow(10.0, (percent - 100.0) / 50.0 * 6.0 / 20.0);
-}
-
 #pragma mark - Model
 
 @implementation SNApp
@@ -109,108 +102,84 @@ static float gainFor(double percent, BOOL muted) {
 #pragma mark - Real-time render
 
 typedef struct {
-    _Atomic float target;
-    float current;
     UInt32 tapBuffers; // the tap's buffers are the last ones in the input list
-    // Level meters, only touched when gDiag is set (debug aid, racy on purpose).
-    double inSq, outSq;
-    uint64_t cnt;
-    float inPeak, outPeak;
+    SNDSP dsp;
 } SNRender;
-
 
 static BOOL gDiag;
 static double dB(double x) { return x > 1e-9 ? 20 * log10(x) : -999; }
 
-enum { kMaxChannels = 16 };
-
-
-// Collects the tap's channels from the input list (they're the last buffers).
-static UInt32 gatherSource(const SNRender *r, const AudioBufferList *in, const float **src, UInt32 *srcStride,
-                           UInt32 *framesOut) {
-    UInt32 nsrc = 0, frames = UINT32_MAX;
-    if (in && in->mNumberBuffers >= r->tapBuffers) {
-        for (UInt32 b = in->mNumberBuffers - r->tapBuffers; b < in->mNumberBuffers; b++) {
-            const AudioBuffer *ab = &in->mBuffers[b];
-            if (!ab->mData || ab->mNumberChannels == 0) continue;
-            UInt32 f = ab->mDataByteSize / (UInt32)(sizeof(float) * ab->mNumberChannels);
-            if (f < frames) frames = f;
-            for (UInt32 c = 0; c < ab->mNumberChannels && nsrc < kMaxChannels; c++, nsrc++) {
-                src[nsrc] = (const float *)ab->mData + c;
-                srcStride[nsrc] = ab->mNumberChannels;
-            }
-        }
-    }
-    *framesOut = nsrc ? frames : 0;
-    return nsrc;
-}
-
 // Runs on Core Audio's real-time thread: no locks, no allocation, no ObjC.
-// Transparent below 0.8, then a smooth knee that approaches ±1 instead of
-// hard-clipping boosted peaks.
-static inline float softLimit(float v) {
-    const float t = 0.8f;
-    float a = fabsf(v);
-    if (a <= t) return v;
-    float y = t + (1.f - t) * tanhf((a - t) / (1.f - t));
-    return v < 0 ? -y : y;
-}
-
+// Unpacks the tap's input, runs the DSP and writes left/right to the first two
+// output channels.
 static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out) {
-    float target = atomic_load_explicit(&r->target, memory_order_relaxed);
-
-    const float *src[kMaxChannels];
-    UInt32 srcStride[kMaxChannels], frames;
-    UInt32 nsrc = gatherSource(r, in, src, srcStride, &frames);
-
-    // Ramp from the previous gain to avoid clicks while a slider moves.
-    float start = r->current;
-    UInt32 oc = 0;
-    for (UInt32 b = 0; b < out->mNumberBuffers; b++) {
-        AudioBuffer *ab = &out->mBuffers[b];
-        if (!ab->mData) continue;
-        memset(ab->mData, 0, ab->mDataByteSize);
-        UInt32 n = ab->mNumberChannels;
-        if (n == 0) continue;
-        UInt32 outFrames = ab->mDataByteSize / (UInt32)(sizeof(float) * n);
-        UInt32 fr = frames < outFrames ? frames : outFrames;
-        float step = fr ? (target - start) / (float)fr : 0;
-        for (UInt32 c = 0; c < n; c++, oc++) {
-            int si = oc < nsrc ? (int)oc : (nsrc == 1 && oc < 2 ? 0 : -1); // mono → both sides
-            if (si < 0) continue;
-            float *dst = (float *)ab->mData + c;
-            const float *s = src[si];
-            UInt32 ss = srcStride[si];
-            float g = start;
-            for (UInt32 i = 0; i < fr; i++, g += step) {
-                float x = s[i * ss];
-                float v = x * g;
-                float y = softLimit(v);
-                dst[i * n] = y;
-                if (gDiag) {
-                    r->cnt++;
-                    r->inSq += x * x; r->outSq += y * y;
-                    if (fabsf(x) > r->inPeak) r->inPeak = fabsf(x);
-                    if (fabsf(y) > r->outPeak) r->outPeak = fabsf(y);
+    // The tap is a stereo mixdown: one interleaved buffer, or two mono ones.
+    const float *srcL = NULL, *srcR = NULL;
+    UInt32 strideL = 0, strideR = 0, inFrames = 0;
+    if (in && r->tapBuffers > 0 && in->mNumberBuffers >= r->tapBuffers) {
+        const AudioBuffer *b0 = &in->mBuffers[in->mNumberBuffers - r->tapBuffers];
+        if (b0->mData && b0->mNumberChannels) {
+            srcL = b0->mData;
+            strideL = b0->mNumberChannels;
+            inFrames = b0->mDataByteSize / (UInt32)(sizeof(float) * strideL);
+            if (strideL >= 2) {
+                srcR = srcL + 1;
+                strideR = strideL;
+            } else if (r->tapBuffers >= 2) {
+                const AudioBuffer *b1 = &in->mBuffers[in->mNumberBuffers - r->tapBuffers + 1];
+                if (b1->mData && b1->mNumberChannels) {
+                    srcR = b1->mData;
+                    strideR = b1->mNumberChannels;
+                    UInt32 f1 = b1->mDataByteSize / (UInt32)(sizeof(float) * strideR);
+                    if (f1 < inFrames) inFrames = f1;
                 }
             }
         }
     }
-    r->current = target;
+
+    UInt32 frames = UINT32_MAX;
+    for (UInt32 b = 0; b < out->mNumberBuffers; b++) {
+        AudioBuffer *ab = &out->mBuffers[b];
+        if (!ab->mData) continue;
+        memset(ab->mData, 0, ab->mDataByteSize);
+        if (ab->mNumberChannels) {
+            UInt32 f = ab->mDataByteSize / (UInt32)(sizeof(float) * ab->mNumberChannels);
+            if (f < frames) frames = f;
+        }
+    }
+    if (frames == UINT32_MAX) return;
+    if (frames > SN_MAX_FRAMES) frames = SN_MAX_FRAMES;
+
+    // Always run the full output length so the limiter's delay line keeps moving.
+    sn_dsp_process(&r->dsp, srcL, strideL, srcR, strideR, inFrames, frames);
+
+    UInt32 oc = 0;
+    for (UInt32 b = 0; b < out->mNumberBuffers; b++) {
+        AudioBuffer *ab = &out->mBuffers[b];
+        UInt32 n = ab->mNumberChannels;
+        if (!ab->mData || n == 0) continue;
+        float *dst = ab->mData;
+        for (UInt32 c = 0; c < n; c++, oc++) {
+            if (oc > 1) continue;
+            const float *s = oc == 0 ? r->dsp.outL : r->dsp.outR;
+            for (UInt32 i = 0; i < frames; i++) dst[i * n + c] = s[i];
+        }
+    }
 }
 
 #pragma mark - Tap
 
-// One live tap + aggregate device. Created and destroyed only on the engine's tap queue.
+// One live tap + aggregate device. Created, changed and destroyed only on the engine's tap queue.
 @interface SNTap : NSObject
 @property(nonatomic, copy) NSArray<NSNumber *> *processes;
 @property(nonatomic, copy) NSString *outputUID;
-@property(nonatomic) SNRender *render;
+@property(nonatomic, readonly) SNRender *render;
 @end
 
 @implementation SNTap {
     AudioObjectID _tapID, _aggID;
     AudioDeviceIOProcID _procID;
+    CATapDescription *_desc;
 }
 
 - (instancetype)initWithKey:(NSString *)key processes:(NSArray<NSNumber *> *)processes
@@ -219,30 +188,19 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     _processes = [processes copy];
     _outputUID = [outputUID copy];
     _render = calloc(1, sizeof(SNRender));
-    atomic_store(&_render->target, gain);
-    _render->current = gain;
-    _render->tapBuffers = 1;
 
-    CATapDescription *desc = [[CATapDescription alloc] initStereoMixdownOfProcesses:processes];
-    desc.name = [@"Sonora " stringByAppendingString:key];
-    desc.privateTap = YES;
+    _desc = [[CATapDescription alloc] initStereoMixdownOfProcesses:processes];
+    _desc.name = [@"Sonora " stringByAppendingString:key];
+    _desc.privateTap = YES;
     // Muted only while Sonora reads the tap: if Sonora stops or crashes the
     // app is audible again rather than silenced.
-    desc.muteBehavior = CATapMutedWhenTapped;
+    _desc.muteBehavior = CATapMutedWhenTapped;
 
-    OSStatus err = AudioHardwareCreateProcessTap(desc, &_tapID);
+    OSStatus err = AudioHardwareCreateProcessTap(_desc, &_tapID);
     if (err != noErr) {
         NSLog(@"sonora: creating tap for %@ failed (%d)", key, (int)err);
         [self teardown];
         return nil;
-    }
-
-    AudioObjectPropertyAddress fa = addr(kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal);
-    AudioStreamBasicDescription fmt = {0};
-    UInt32 size = sizeof(fmt);
-    if (AudioObjectGetPropertyData(_tapID, &fa, 0, NULL, &size, &fmt) == noErr &&
-        (fmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved) && fmt.mChannelsPerFrame > 0) {
-        _render->tapBuffers = fmt.mChannelsPerFrame;
     }
 
     NSDictionary *agg = @{
@@ -254,7 +212,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         @kAudioAggregateDeviceTapAutoStartKey : @YES,
         @kAudioAggregateDeviceSubDeviceListKey : @[ @{@kAudioSubDeviceUIDKey : outputUID} ],
         @kAudioAggregateDeviceTapListKey : @[ @{
-            @kAudioSubTapUIDKey : desc.UUID.UUIDString,
+            @kAudioSubTapUIDKey : _desc.UUID.UUIDString,
             @kAudioSubTapDriftCompensationKey : @YES,
         } ],
     };
@@ -263,6 +221,22 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         NSLog(@"sonora: creating aggregate device for %@ failed (%d)", key, (int)err);
         [self teardown];
         return nil;
+    }
+
+    AudioObjectPropertyAddress ra = addr(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal);
+    Float64 rate = 0;
+    UInt32 size = sizeof(rate);
+    AudioObjectGetPropertyData(_aggID, &ra, 0, NULL, &size, &rate);
+    sn_dsp_init(&_render->dsp, gain, rate);
+    _render->dsp.meter = gDiag;
+    _render->tapBuffers = 1;
+
+    AudioObjectPropertyAddress fa = addr(kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal);
+    AudioStreamBasicDescription fmt = {0};
+    size = sizeof(fmt);
+    if (AudioObjectGetPropertyData(_tapID, &fa, 0, NULL, &size, &fmt) == noErr &&
+        (fmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved) && fmt.mChannelsPerFrame > 0) {
+        _render->tapBuffers = fmt.mChannelsPerFrame;
     }
 
     SNRender *r = _render;
@@ -280,20 +254,36 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     return self;
 }
 
-// Debug: levels since the last call, as "in/out rms dB, peak dB, gain".
+// Points the existing tap at a new set of processes (e.g. a browser opened a
+// new tab process) without the glitch of rebuilding it.
+- (BOOL)updateProcesses:(NSArray<NSNumber *> *)processes {
+    _desc.processes = processes;
+    CATapDescription *desc = _desc;
+    AudioObjectPropertyAddress a = addr(kAudioTapPropertyDescription, kAudioObjectPropertyScopeGlobal);
+    OSStatus err = AudioObjectSetPropertyData(_tapID, &a, 0, NULL, sizeof(desc), &desc);
+    if (err != noErr) return NO;
+    _processes = [processes copy];
+    return YES;
+}
+
+// Debug: levels since the last call.
 - (NSString *)takeStats {
-    SNRender *r = _render;
-    if (!r) return @"(gone)";
-    double n = r->cnt ? (double)r->cnt : 1;
-    NSString *s = [NSString stringWithFormat:@"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | gain target %.3f current %.3f",
-                   dB(sqrt(r->inSq / n)), dB(r->inPeak), dB(sqrt(r->outSq / n)), dB(r->outPeak),
-                   atomic_load(&r->target), r->current];
-    r->inSq = r->outSq = 0; r->inPeak = r->outPeak = 0; r->cnt = 0;
+    SNDSP *r = &_render->dsp;
+    double n = r->count ? (double)r->count : 1;
+    NSString *s = [NSString stringWithFormat:
+        @"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | limiter %5.1f dB | gain %.3f",
+        dB(sqrt(r->inSq / n)), dB(r->inPeak), dB(sqrt(r->outSq / n)), dB(r->outPeak), dB(r->minLimit),
+        atomic_load(&r->target)];
+    r->inSq = r->outSq = 0; r->inPeak = r->outPeak = 0; r->count = 0; r->minLimit = 1;
     return s;
 }
 
 - (void)setGain:(float)gain {
-    atomic_store_explicit(&_render->target, gain, memory_order_relaxed);
+    sn_dsp_set_gain(&_render->dsp, gain);
+}
+
+- (float)gain {
+    return atomic_load_explicit(&_render->dsp.target, memory_order_relaxed);
 }
 
 - (void)teardown {
@@ -323,13 +313,15 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 
 @implementation SNEngine {
     dispatch_queue_t _tapQueue;
-    NSMutableDictionary<NSString *, SNTap *> *_taps;          // tap queue only
-    NSMutableDictionary<NSString *, NSDate *> *_lastPlaying;  // main thread only
-    NSMutableSet<NSNumber *> *_observedProcesses;             // main thread only
+    NSMutableDictionary<NSString *, SNTap *> *_taps;            // tap queue only
+    NSMutableDictionary<NSString *, NSDate *> *_lastPlaying;    // main thread only
+    NSMutableDictionary<NSString *, NSDate *> *_lastNonUnity;   // main thread only
+    NSMutableSet<NSNumber *> *_observedProcesses;               // main thread only
     NSArray<SNApp *> *_apps;
     NSString *_outputDeviceName;
     NSString *_outputUID;
     NSTimer *_timer;
+    BOOL _refreshPending;
 }
 
 + (instancetype)shared {
@@ -344,6 +336,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     _tapQueue = dispatch_queue_create("sonora.taps", DISPATCH_QUEUE_SERIAL);
     _taps = [NSMutableDictionary new];
     _lastPlaying = [NSMutableDictionary new];
+    _lastNonUnity = [NSMutableDictionary new];
     _observedProcesses = [NSMutableSet new];
     _apps = @[];
     return self;
@@ -358,23 +351,38 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         gDiag = YES;
         [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
             SNEngine *e = weakSelf;
+            if (!e) return;
             dispatch_async(e->_tapQueue, ^{
                 for (NSString *key in e->_taps) NSLog(@"sonora[debug] %@: %@", key, [e->_taps[key] takeStats]);
             });
         }];
     }
-    AudioObjectPropertyListenerBlock refresh = ^(UInt32 n, const AudioObjectPropertyAddress *a) {
-        [weakSelf refresh];
+    AudioObjectPropertyListenerBlock changed = ^(UInt32 n, const AudioObjectPropertyAddress *a) {
+        [weakSelf setNeedsRefresh];
     };
     AudioObjectPropertyAddress procs = addr(kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyScopeGlobal);
     AudioObjectPropertyAddress dev = addr(kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal);
-    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &procs, dispatch_get_main_queue(), refresh);
-    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &dev, dispatch_get_main_queue(), refresh);
+    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &procs, dispatch_get_main_queue(), changed);
+    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &dev, dispatch_get_main_queue(), changed);
 
-    // Listeners cover starts/stops; the timer handles the grace-period expiry.
+    // Listeners cover starts/stops; the timer handles grace-period expiry.
     _timer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) { [weakSelf refresh]; }];
     _timer.tolerance = 0.5;
     [self refresh];
+}
+
+// Core Audio often fires several notifications in a burst (a browser starting
+// a few processes at once); coalesce them into one rescan.
+- (void)setNeedsRefresh {
+    if (_refreshPending) return;
+    _refreshPending = YES;
+    __weak SNEngine *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        SNEngine *e = weakSelf;
+        if (!e) return;
+        e->_refreshPending = NO;
+        [e refresh];
+    });
 }
 
 + (NSArray<SNApp *> *)scanApps {
@@ -431,7 +439,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             if ([_observedProcesses containsObject:obj]) continue;
             AudioObjectPropertyAddress a = addr(kAudioProcessPropertyIsRunningOutput, kAudioObjectPropertyScopeGlobal);
             AudioObjectAddPropertyListenerBlock(obj.unsignedIntValue, &a, dispatch_get_main_queue(),
-                ^(UInt32 n, const AudioObjectPropertyAddress *x) { [weakSelf refresh]; });
+                ^(UInt32 n, const AudioObjectPropertyAddress *x) { [weakSelf setNeedsRefresh]; });
         }
     }
     [_observedProcesses setSet:current]; // dead process objects take their listeners with them
@@ -465,11 +473,15 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 // Pushes the current settings for the visible apps to the tap queue. Cheap
 // enough to call on every slider tick.
 - (void)apply {
+    NSDate *now = [NSDate date];
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
     for (SNApp *app in _apps) {
         if (app.inCall) continue; // call audio reaches a tap far below its final level; leave it alone
-        float gain = gainFor([self volumeForKey:app.key], [self mutedForKey:app.key]);
-        if (gain != 1.f) wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
+        float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]);
+        if (gain != 1.f) _lastNonUnity[app.key] = now;
+        NSDate *last = _lastNonUnity[app.key];
+        BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
+        if (gain != 1.f || holding) wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
     [self reconcile:wanted outputUID:_outputUID];
 }
@@ -480,8 +492,13 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         for (NSString *key in self->_taps.allKeys) {
             SNTap *tap = self->_taps[key];
             NSDictionary *w = wanted[key];
-            if (!w || !outputUID || ![tap.processes isEqual:w[@"processes"]] || ![tap.outputUID isEqual:outputUID]) {
-                if (gDiag) NSLog(@"sonora[debug] destroy tap %@ (wanted=%d)", key, w != nil);
+            BOOL keep = w && outputUID && [tap.outputUID isEqual:outputUID];
+            if (keep && ![tap.processes isEqual:w[@"processes"]]) {
+                keep = [tap updateProcesses:w[@"processes"]];
+                if (gDiag) NSLog(@"sonora[debug] %@ processes -> %@ (%@)", key, w[@"processes"], keep ? @"updated" : @"rebuild");
+            }
+            if (!keep) {
+                if (gDiag) NSLog(@"sonora[debug] destroy tap %@", key);
                 [self->_taps removeObjectForKey:key]; // dealloc tears it down
             }
         }
@@ -490,11 +507,11 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             float gain = [w[@"gain"] floatValue];
             SNTap *tap = self->_taps[key];
             if (tap) {
-                if (gDiag && fabsf(gain - atomic_load(&tap.render->target)) > 1e-4) NSLog(@"sonora[debug] %@ gain -> %.3f", key, gain);
+                if (gDiag && fabsf(gain - tap.gain) > 1e-4) NSLog(@"sonora[debug] %@ gain -> %.3f", key, gain);
                 [tap setGain:gain];
             } else if ((tap = [[SNTap alloc] initWithKey:key processes:w[@"processes"] outputUID:outputUID gain:gain])) {
                 self->_taps[key] = tap;
-                if (gDiag) NSLog(@"sonora[debug] create tap %@ gain %.3f processes %@", key, gain, w[@"processes"]);
+                if (gDiag) NSLog(@"sonora[debug] create tap %@ gain %.3f", key, gain);
             }
         }];
     });

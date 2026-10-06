@@ -5,7 +5,7 @@ export CGO_CFLAGS  := -O2 -mmacosx-version-min=14.2
 export CGO_LDFLAGS := -mmacosx-version-min=14.2
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: app run install universal zip clean
+.PHONY: app run install test universal zip clean
 
 # Builds build/Sonora.app for this Mac's architecture.
 app:
@@ -14,6 +14,10 @@ app:
 	go build -ldflags "$(LDFLAGS)" -o $(APP)/Contents/MacOS/Sonora .
 	sed 's/VERSION/$(VERSION)/g' Info.plist > $(APP)/Contents/Info.plist
 	codesign --force --sign - $(APP)
+
+test:
+	go vet ./...
+	go test ./...
 
 run: app
 	open $(APP)

@@ -46,7 +46,7 @@ cd sonora
 make install      # builds Sonora.app, copies it to /Applications and launches it
 ```
 
-Other targets: `make app` (build only, into `build/`), `make run`, `make universal` (arm64 + x86_64), `make zip`.
+Other targets: `make app` (build only, into `build/`), `make run`, `make test`, `make universal` (arm64 + x86_64), `make zip`.
 
 The first time you change an app's volume, macOS asks for permission to capture **system audio**. Allow it (System Settings → Privacy & Security → Screen & System Audio Recording → *System Audio Recording Only*). Sonora needs it to read the app's audio and play it back at the new level. Nothing is recorded or sent anywhere.
 
@@ -70,7 +70,9 @@ When the app goes back to 100%, or has been quiet for a few seconds, the tap is 
 | --- | --- |
 | `main.go` | Entry point and CLI flags (`-list`, `-version`) |
 | `settings.go` | Per-app settings saved to `~/Library/Application Support/Sonora/settings.json` and exported to the native side |
-| `engine.m` | Audio engine: process discovery and grouping, taps, aggregate devices, real-time gain |
+| `engine.m` | Audio engine: process discovery and grouping, taps, aggregate devices |
+| `dsp.c` / `dsp.h` | Real-time signal path: gain ramp and look-ahead limiter (plain C, unit-tested) |
+| `dsp.go`, `dsp_test.go` | Go wrapper for the DSP, and tests for transparency, clipping, distortion and smoothness |
 | `ui.m` | Menu bar item and slider rows (AppKit) |
 
 The UI and audio layers are Objective-C called through cgo, since AppKit and the real-time Core Audio callback have no pure-Go equivalent. Everything else is Go.
@@ -79,12 +81,14 @@ The UI and audio layers are Objective-C called through cgo, since AppKit and the
 
 - **Call apps (WhatsApp, FaceTime, Zoom…) can't be scaled.** While an app is using the microphone and speaker together, macOS processes its audio so that it reaches a tap far below its final level, and replaying it would sound much quieter than normal. Sonora detects this, shows the app as **In call** and leaves it alone. The intended use is to lower *everything else* (YouTube, music) while the call stays at the system volume.
 - Creating or removing a tap can cause a very short glitch in other audio.
-- Boosting is limited to +6 dB (150%), with a soft limiter so peaks don't hard-clip.
+- Boosting is limited to +6 dB (150%).
 - Output follows the system default device. Routing apps to different devices isn't supported (yet).
 
-## Volume curve
+## Volume curve and limiter
 
 Below 100% the slider is squared (50% ≈ -12 dB, about half as loud to the ear). Above 100% it boosts evenly in dB, up to +6 dB at 150%. 100% is exactly unity and bypasses Sonora entirely.
+
+Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceiling. Instead of reshaping individual samples, which is what makes boosted audio crackle, it lowers the volume smoothly about 1.3 ms *before* a peak arrives, then recovers over about 80 ms. Left and right share one gain, so the stereo image never shifts. Gain changes from the sliders are ramped to avoid clicks.
 
 ## Debugging
 
