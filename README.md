@@ -23,6 +23,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 - Browser and app helper processes are grouped under the app you know (Chrome, Safari, WhatsApp…).
 - No audio driver or kernel extension to install, and no virtual device to pick. It works with whatever output you're using, including AirPods, and follows output changes automatically.
 - Apps you leave at 100% are not touched at all.
+- The menu bar title "deciphers" into the app name and level whenever you move a slider, then goes back to the plain icon. (It stays still if macOS *Reduce Motion* is on.)
 
 ## Requirements
 
@@ -74,19 +75,23 @@ When the app goes back to 100%, or has been quiet for a few seconds, the tap is 
 
 The UI and audio layers are Objective-C called through cgo, since AppKit and the real-time Core Audio callback have no pure-Go equivalent. Everything else is Go.
 
-### Debugging
-
-```sh
-make app && ./build/Sonora.app/Contents/MacOS/Sonora -list
-```
-
-This prints every Core Audio client grouped the way Sonora sees it, and marks the ones playing right now.
-
 ## Known limitations
 
-- **Voice calls on speakers:** when a call app's volume is changed, its echo cancellation may not see the re-played audio, so the other side might hear an echo. Headphones avoid this. Leaving the call app at 100% (and lowering everything else) also avoids it.
-- Volumes above 100% are hard-clipped, so heavy boosting of already-loud audio can distort.
+- **Call apps (WhatsApp, FaceTime, Zoom…) can't be scaled.** While an app is using the microphone and speaker together, macOS processes its audio so that it reaches a tap far below its final level, and replaying it would sound much quieter than normal. Sonora detects this, shows the app as **In call** and leaves it alone. The intended use is to lower *everything else* (YouTube, music) while the call stays at the system volume.
+- Creating or removing a tap can cause a very short glitch in other audio.
+- Boosting is limited to +6 dB (150%), with a soft limiter so peaks don't hard-clip.
 - Output follows the system default device. Routing apps to different devices isn't supported (yet).
+
+## Volume curve
+
+Below 100% the slider is squared (50% ≈ -12 dB, about half as loud to the ear). Above 100% it boosts evenly in dB, up to +6 dB at 150%. 100% is exactly unity and bypasses Sonora entirely.
+
+## Debugging
+
+```sh
+./build/Sonora.app/Contents/MacOS/Sonora -list          # audio apps; PLAYING / CALL / idle
+SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains and measured levels
+```
 
 ## Roadmap
 

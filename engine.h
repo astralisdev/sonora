@@ -3,6 +3,8 @@
 #import <CoreAudio/CoreAudio.h>
 
 extern NSNotificationName const SNEngineAppsDidChangeNotification;
+// Posted when the user changes an app's volume or mute. userInfo: key, percent (NSNumber), muted (NSNumber).
+extern NSNotificationName const SNEngineVolumeDidChangeNotification;
 
 // One user-facing app, possibly made of several audio processes (e.g. a browser
 // and its helper processes all count as the browser).
@@ -12,6 +14,7 @@ extern NSNotificationName const SNEngineAppsDidChangeNotification;
 @property(nonatomic, strong) NSImage *icon;
 @property(nonatomic, copy) NSArray<NSNumber *> *processObjects; // AudioObjectIDs
 @property(nonatomic) BOOL playing;             // any process is producing output
+@property(nonatomic) BOOL inCall;              // also using the mic: a call, whose audio a tap can't scale accurately
 @end
 
 @interface SNEngine : NSObject

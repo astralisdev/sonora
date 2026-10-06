@@ -17,6 +17,7 @@
 #include "_cgo_export.h"
 
 NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidChange";
+NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeDidChange";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
 // video doesn't rebuild the tap every time.
@@ -88,10 +89,16 @@ static NSRunningApplication *owningApp(NSString *bundleID) {
     return nil;
 }
 
+// Slider percent → linear gain. Below 100% it follows a squared curve (50% is
+// about -12 dB, which sounds close to half as loud). Above 100% it boosts in
+// even dB steps up to +6 dB at 150%, so the top of the slider isn't a cliff.
 static float gainFor(double percent, BOOL muted) {
     if (muted) return 0;
-    double x = percent / 100.0;
-    return (float)(x * x); // perceptual curve: 50% sounds about half as loud
+    if (percent <= 100) {
+        double x = percent / 100.0;
+        return (float)(x * x);
+    }
+    return (float)pow(10.0, (percent - 100.0) / 50.0 * 6.0 / 20.0);
 }
 
 #pragma mark - Model
@@ -105,16 +112,22 @@ typedef struct {
     _Atomic float target;
     float current;
     UInt32 tapBuffers; // the tap's buffers are the last ones in the input list
+    // Level meters, only touched when gDiag is set (debug aid, racy on purpose).
+    double inSq, outSq;
+    uint64_t cnt;
+    float inPeak, outPeak;
 } SNRender;
+
+
+static BOOL gDiag;
+static double dB(double x) { return x > 1e-9 ? 20 * log10(x) : -999; }
 
 enum { kMaxChannels = 16 };
 
-// Runs on Core Audio's real-time thread: no locks, no allocation, no ObjC.
-static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out) {
-    float target = atomic_load_explicit(&r->target, memory_order_relaxed);
 
-    const float *src[kMaxChannels];
-    UInt32 srcStride[kMaxChannels];
+// Collects the tap's channels from the input list (they're the last buffers).
+static UInt32 gatherSource(const SNRender *r, const AudioBufferList *in, const float **src, UInt32 *srcStride,
+                           UInt32 *framesOut) {
     UInt32 nsrc = 0, frames = UINT32_MAX;
     if (in && in->mNumberBuffers >= r->tapBuffers) {
         for (UInt32 b = in->mNumberBuffers - r->tapBuffers; b < in->mNumberBuffers; b++) {
@@ -128,7 +141,27 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             }
         }
     }
-    if (nsrc == 0) frames = 0;
+    *framesOut = nsrc ? frames : 0;
+    return nsrc;
+}
+
+// Runs on Core Audio's real-time thread: no locks, no allocation, no ObjC.
+// Transparent below 0.8, then a smooth knee that approaches ±1 instead of
+// hard-clipping boosted peaks.
+static inline float softLimit(float v) {
+    const float t = 0.8f;
+    float a = fabsf(v);
+    if (a <= t) return v;
+    float y = t + (1.f - t) * tanhf((a - t) / (1.f - t));
+    return v < 0 ? -y : y;
+}
+
+static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out) {
+    float target = atomic_load_explicit(&r->target, memory_order_relaxed);
+
+    const float *src[kMaxChannels];
+    UInt32 srcStride[kMaxChannels], frames;
+    UInt32 nsrc = gatherSource(r, in, src, srcStride, &frames);
 
     // Ramp from the previous gain to avoid clicks while a slider moves.
     float start = r->current;
@@ -150,8 +183,16 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             UInt32 ss = srcStride[si];
             float g = start;
             for (UInt32 i = 0; i < fr; i++, g += step) {
-                float v = s[i * ss] * g;
-                dst[i * n] = v > 1.f ? 1.f : (v < -1.f ? -1.f : v);
+                float x = s[i * ss];
+                float v = x * g;
+                float y = softLimit(v);
+                dst[i * n] = y;
+                if (gDiag) {
+                    r->cnt++;
+                    r->inSq += x * x; r->outSq += y * y;
+                    if (fabsf(x) > r->inPeak) r->inPeak = fabsf(x);
+                    if (fabsf(y) > r->outPeak) r->outPeak = fabsf(y);
+                }
             }
         }
     }
@@ -239,6 +280,18 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     return self;
 }
 
+// Debug: levels since the last call, as "in/out rms dB, peak dB, gain".
+- (NSString *)takeStats {
+    SNRender *r = _render;
+    if (!r) return @"(gone)";
+    double n = r->cnt ? (double)r->cnt : 1;
+    NSString *s = [NSString stringWithFormat:@"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | gain target %.3f current %.3f",
+                   dB(sqrt(r->inSq / n)), dB(r->inPeak), dB(sqrt(r->outSq / n)), dB(r->outPeak),
+                   atomic_load(&r->target), r->current];
+    r->inSq = r->outSq = 0; r->inPeak = r->outPeak = 0; r->cnt = 0;
+    return s;
+}
+
 - (void)setGain:(float)gain {
     atomic_store_explicit(&_render->target, gain, memory_order_relaxed);
 }
@@ -301,6 +354,15 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 
 - (void)start {
     __weak SNEngine *weakSelf = self;
+    if (getenv("SONORA_DEBUG")) {
+        gDiag = YES;
+        [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
+            SNEngine *e = weakSelf;
+            dispatch_async(e->_tapQueue, ^{
+                for (NSString *key in e->_taps) NSLog(@"sonora[debug] %@: %@", key, [e->_taps[key] takeStats]);
+            });
+        }];
+    }
     AudioObjectPropertyListenerBlock refresh = ^(UInt32 n, const AudioObjectPropertyAddress *a) {
         [weakSelf refresh];
     };
@@ -326,6 +388,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         if (pid <= 0 || pid == me) continue;
         NSString *bundleID = readString(pobj, kAudioProcessPropertyBundleID);
         BOOL playing = readU32(pobj, kAudioProcessPropertyIsRunningOutput, 0) != 0;
+        BOOL listening = readU32(pobj, kAudioProcessPropertyIsRunningInput, 0) != 0;
 
         NSRunningApplication *ra = [NSRunningApplication runningApplicationWithProcessIdentifier:responsiblePID(pid)];
         if (!ra.bundleIdentifier) ra = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
@@ -351,6 +414,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         }
         app.processObjects = [app.processObjects arrayByAddingObject:obj];
         app.playing = app.playing || playing;
+        app.inCall = app.inCall || (playing && listening);
     }
     return ordered;
 }
@@ -387,7 +451,12 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     _outputUID = readString(dev, kAudioDevicePropertyDeviceUID);
     _outputDeviceName = readString(dev, kAudioObjectPropertyName);
 
-    BOOL changed = ![[_apps valueForKey:@"key"] isEqual:[visible valueForKey:@"key"]];
+    NSString *(^signature)(NSArray<SNApp *> *) = ^NSString *(NSArray<SNApp *> *list) {
+        NSMutableString *sig = [NSMutableString new];
+        for (SNApp *a in list) [sig appendFormat:@"%@:%d;", a.key, a.inCall];
+        return sig;
+    };
+    BOOL changed = ![signature(_apps) isEqualToString:signature(visible)];
     _apps = visible;
     [self apply];
     if (changed) [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineAppsDidChangeNotification object:self];
@@ -398,6 +467,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 - (void)apply {
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
     for (SNApp *app in _apps) {
+        if (app.inCall) continue; // call audio reaches a tap far below its final level; leave it alone
         float gain = gainFor([self volumeForKey:app.key], [self mutedForKey:app.key]);
         if (gain != 1.f) wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
@@ -411,6 +481,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             SNTap *tap = self->_taps[key];
             NSDictionary *w = wanted[key];
             if (!w || !outputUID || ![tap.processes isEqual:w[@"processes"]] || ![tap.outputUID isEqual:outputUID]) {
+                if (gDiag) NSLog(@"sonora[debug] destroy tap %@ (wanted=%d)", key, w != nil);
                 [self->_taps removeObjectForKey:key]; // dealloc tears it down
             }
         }
@@ -419,9 +490,11 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             float gain = [w[@"gain"] floatValue];
             SNTap *tap = self->_taps[key];
             if (tap) {
+                if (gDiag && fabsf(gain - atomic_load(&tap.render->target)) > 1e-4) NSLog(@"sonora[debug] %@ gain -> %.3f", key, gain);
                 [tap setGain:gain];
             } else if ((tap = [[SNTap alloc] initWithKey:key processes:w[@"processes"] outputUID:outputUID gain:gain])) {
                 self->_taps[key] = tap;
+                if (gDiag) NSLog(@"sonora[debug] create tap %@ gain %.3f processes %@", key, gain, w[@"processes"]);
             }
         }];
     });
@@ -442,6 +515,8 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 - (void)setVolume:(double)percent muted:(BOOL)muted forKey:(NSString *)key {
     snSetSetting((char *)key.UTF8String, percent, muted);
     [self apply];
+    [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineVolumeDidChangeNotification object:self
+        userInfo:@{@"key" : key, @"percent" : @(percent), @"muted" : @(muted)}];
 }
 
 - (void)resetAll {
@@ -461,7 +536,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 void SNListProcesses(void) {
     @autoreleasepool {
         for (SNApp *app in [SNEngine scanApps]) {
-            printf("%-8s %-40s %s (%lu process%s)\n", app.playing ? "PLAYING" : "-", app.key.UTF8String,
+            printf("%-8s %-40s %s (%lu process%s)\n", app.inCall ? "CALL" : (app.playing ? "PLAYING" : "-"), app.key.UTF8String,
                    app.name.UTF8String, (unsigned long)app.processObjects.count,
                    app.processObjects.count == 1 ? "" : "es");
         }
