@@ -7,16 +7,16 @@
 Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zoom meeting, or mute that one noisy tab without touching the system volume.
 
 ```
- ┌───────────────────────────────────────┐
- │ Output: MacBook Pro Speakers          │
+ ┌─────────────────────────────────────────┐
+ │ Output: MacBook Pro Speakers            │
  │ [▶] YouTube (Safari)  ━━━━━○──────  45% │
- │ [✆] WhatsApp          ━━━━━━━━━━○ 100% │
- │ [♫] Spotify           Muted            │
- ├───────────────────────────────────────┤
- │ Reset All Levels                      │
- │ ✓ Launch at Login                     │
- │ Quit Sonora                        ⌘Q │
- └───────────────────────────────────────┘
+ │ [✆] WhatsApp          ━━━━━━━━━━○ 100%  │
+ │ [♫] Spotify           Muted             │
+ ├─────────────────────────────────────────┤
+ │ Reset All Levels                        │
+ │ ✓ Launch at Login                       │
+ │ Quit Sonora                        ⌘Q   │
+ └─────────────────────────────────────────┘
 ```
 
 - One slider per app that is playing audio, from 0% to 150% (boost).
