@@ -488,17 +488,45 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 
 - (void)resetAll:(id)sender { [[SNEngine shared] resetAll]; }
 
+// A Control Center label in the user's language, so the instructions name
+// exactly what they see on screen. Falls back to English.
+static NSString *controlCenterString(NSString *key, NSString *fallback) {
+    static NSDictionary *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = [NSDictionary dictionaryWithContentsOfFile:
+            @"/System/Library/CoreServices/ControlCenter.app/Contents/Resources/AudioVideo.loctable"];
+    });
+    for (NSString *lang in NSLocale.preferredLanguages) { // e.g. "it-IT"
+        NSString *full = [lang stringByReplacingOccurrencesOfString:@"-" withString:@"_"];
+        NSString *base = [lang componentsSeparatedByString:@"-"].firstObject;
+        for (NSString *code in @[ full, base ]) {
+            NSString *s = table[code][key];
+            if ([s isKindOfClass:NSString.class]) return s;
+        }
+    }
+    NSString *en = table[@"en"][key];
+    return [en isKindOfClass:NSString.class] ? en : fallback;
+}
+
 - (void)explainVoiceIsolation:(id)sender {
     NSString *callApp = @"your call app";
     for (SNApp *app in [SNEngine shared].apps) if (app.inCall) callApp = app.name;
+    NSString *module = controlCenterString(@"AudioVideoModule", @"Audio and Video Controls");
+    NSString *micMode = controlCenterString(@"Mic Mode", @"Mic Mode");
+    NSString *isolation = controlCenterString(@"Voice Isolation", @"Voice Isolation");
+
     NSAlert *alert = [NSAlert new];
-    alert.messageText = @"Turn on Voice Isolation";
+    alert.messageText = [NSString stringWithFormat:@"Turn on “%@”", isolation];
     alert.informativeText = [NSString stringWithFormat:
-        @"Voice Isolation makes the other person hear only your voice, not music or noise in the room.\n\n"
-        @"1. Click Control Center in the menu bar (the icon with two switches).\n"
-        @"2. Click Mic Mode at the top. It only appears during a call.\n"
-        @"3. Choose Voice Isolation.\n\n"
-        @"macOS remembers this for %@, so you only need to do it once.", callApp];
+        @"It makes the other person hear only your voice, not music or noise in the room.\n\n"
+        @"1. While the call is on, click the camera/microphone icon that appears in the menu bar (“%@”). "
+        @"If you don't see it, open Control Center.\n"
+        @"2. Click “%@”.\n"
+        @"3. Choose “%@”.\n\n"
+        @"macOS remembers this for %@. If it says the app doesn't support it, use "
+        @"During Calls → Mute Other Apps in Sonora instead.",
+        module, micMode, isolation, callApp];
     alert.icon = [NSImage imageWithSystemSymbolName:@"mic.fill" accessibilityDescription:nil];
     [alert addButtonWithTitle:@"OK"];
     [NSApp activateIgnoringOtherApps:YES];
