@@ -7,7 +7,7 @@ package main
 
 /*
 #cgo CFLAGS: -fobjc-arc -Wno-unused-command-line-argument
-#cgo LDFLAGS: -framework Cocoa -framework CoreAudio -framework QuartzCore -framework ServiceManagement
+#cgo LDFLAGS: -framework Cocoa -framework AVFoundation -framework CoreAudio -framework QuartzCore -framework ServiceManagement
 #include "sonora.h"
 */
 import "C"

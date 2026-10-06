@@ -1,6 +1,7 @@
 // ui.m — the menu bar item and its per-app volume sliders.
 
 #import <AppKit/AppKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import "engine.h"
@@ -431,6 +432,21 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     }
     for (SNApp *app in engine.apps) [self addRow:app index:index++];
 
+    if (engine.callActive) {
+        // macOS's own mic filter (Voice Isolation) removes music and noise far
+        // better than a call app's echo canceller; it's chosen per app in
+        // Control Center, so the best Sonora can do is open that picker.
+        [_menu addItem:NSMenuItem.separatorItem];
+        NSMenuItem *mic = [self addItem:@"Microphone Mode…" action:@selector(showMicModes:) key:@""];
+        mic.image = [NSImage imageWithSystemSymbolName:@"mic.fill" accessibilityDescription:nil];
+        mic.toolTip = @"Choose Voice Isolation so the other person hears only your voice, "
+                      @"not music or noise from the room.";
+        NSMenuItem *hint = [[NSMenuItem alloc] initWithTitle:@"Pick Voice Isolation to filter out music" action:nil keyEquivalent:@""];
+        hint.enabled = NO;
+        hint.indentationLevel = 1;
+        [_menu addItem:hint];
+    }
+
     [_menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *reset = [self addItem:@"Reset All Levels" action:@selector(resetAll:) key:@""];
     reset.toolTip = @"Set every app back to 100%, its normal volume.";
@@ -477,6 +493,10 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 }
 
 - (void)resetAll:(id)sender { [[SNEngine shared] resetAll]; }
+
+- (void)showMicModes:(id)sender {
+    [AVCaptureDevice showSystemUserInterface:AVCaptureSystemUserInterfaceMicrophoneModes];
+}
 
 - (void)setCallDuck:(NSMenuItem *)sender {
     [SNEngine shared].callDuckDB = [sender.representedObject doubleValue];

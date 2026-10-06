@@ -36,6 +36,9 @@ extern NSNotificationName const SNEngineCallDuckingDidStartNotification;
 @property(nonatomic, readonly) BOOL permissionProblem;
 - (void)retryPermission;
 
+// YES while an app is in a call (running Apple voice processing).
+@property(nonatomic, readonly) BOOL callActive;
+
 // How much other apps are lowered while a call is active: 0 = off, 6 or 12 dB,
 // 100 = muted. Persisted in settings.json as callDuckDB.
 @property(nonatomic) double callDuckDB;
