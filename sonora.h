@@ -17,4 +17,7 @@ void SNSnapshotWelcome(const char *path);
 // Debug: alternates an app between direct playback and Sonora at 100%.
 void SNCompare(const char *bundleID);
 
+// Debug: renders the call tip to a PNG.
+void SNSnapshotTip(const char *path);
+
 #endif

@@ -354,6 +354,53 @@ static void animateIn(NSView *view, NSUInteger index) {
 
 #pragma mark - Call tip
 
+// The tip's contents: icon, question, explanation and two buttons, laid out
+// with room to breathe. Buttons send callTipShowHow: / callTipDismiss: to target.
+static NSView *callTipView(NSString *name, id target) {
+    NSImageView *icon = [NSImageView imageViewWithImage:
+        [NSImage imageWithSystemSymbolName:@"mic.badge.plus" accessibilityDescription:nil]];
+    icon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:24 weight:NSFontWeightMedium];
+    icon.contentTintColor = NSColor.systemGreenColor;
+
+    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"On a call in %@?", name]];
+    title.font = [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold];
+    NSTextField *body = [NSTextField wrappingLabelWithString:
+        @"Turn on Voice Isolation so they hear only your voice, not your music or the room."];
+    body.font = [NSFont systemFontOfSize:12.5];
+    body.textColor = NSColor.secondaryLabelColor;
+    body.selectable = NO;
+    [body.widthAnchor constraintEqualToConstant:300].active = YES;
+
+    NSButton *how = [NSButton buttonWithTitle:@"Show Me How" target:target action:@selector(callTipShowHow:)];
+    how.keyEquivalent = @"\r";
+    NSButton *later = [NSButton buttonWithTitle:@"Not Now" target:target action:@selector(callTipDismiss:)];
+    NSStackView *buttons = [NSStackView stackViewWithViews:@[ later, how ]];
+    buttons.spacing = 10;
+
+    NSStackView *text = [NSStackView stackViewWithViews:@[ title, body, buttons ]];
+    text.orientation = NSUserInterfaceLayoutOrientationVertical;
+    text.alignment = NSLayoutAttributeLeading;
+    text.spacing = 6;
+    [text setCustomSpacing:20 afterView:body]; // clear gap before the buttons
+    NSStackView *content = [NSStackView stackViewWithViews:@[ icon, text ]];
+    content.alignment = NSLayoutAttributeTop;
+    content.spacing = 16;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // Margins are pinned explicitly: a top-aligned horizontal stack view drops
+    // its bottom edge inset when sizing itself.
+    NSView *container = [NSView new];
+    [container addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.topAnchor constraintEqualToAnchor:container.topAnchor constant:20],
+        [content.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-20],
+        [content.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:20],
+        [content.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-24],
+    ]];
+    return container;
+}
+
+
 // Once per call app: a small bubble under the menu bar icon suggesting Voice
 // Isolation, which most people never find on their own.
 - (void)showCallTipFor:(NSString *)key name:(NSString *)name {
@@ -362,35 +409,7 @@ static void animateIn(NSView *view, NSUInteger index) {
     if ([d boolForKey:shownKey] || _menuOpen || !_statusItem.button.window) return;
     [d setBool:YES forKey:shownKey];
 
-    NSImageView *icon = [NSImageView imageViewWithImage:
-        [NSImage imageWithSystemSymbolName:@"mic.badge.plus" accessibilityDescription:nil]];
-    icon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:20 weight:NSFontWeightMedium];
-    icon.contentTintColor = NSColor.systemGreenColor;
-
-    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"On a call in %@?", name]];
-    title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
-    NSTextField *body = [NSTextField wrappingLabelWithString:
-        @"Turn on Voice Isolation so they hear only your voice, not your music or the room."];
-    body.font = [NSFont systemFontOfSize:11.5];
-    body.textColor = NSColor.secondaryLabelColor;
-    body.selectable = NO;
-    [body.widthAnchor constraintEqualToConstant:230].active = YES;
-
-    NSButton *how = [NSButton buttonWithTitle:@"Show Me How" target:self action:@selector(callTipShowHow:)];
-    how.keyEquivalent = @"\r";
-    NSButton *later = [NSButton buttonWithTitle:@"Not Now" target:self action:@selector(callTipDismiss:)];
-    NSStackView *buttons = [NSStackView stackViewWithViews:@[ later, how ]];
-
-    NSStackView *text = [NSStackView stackViewWithViews:@[ title, body, buttons ]];
-    text.orientation = NSUserInterfaceLayoutOrientationVertical;
-    text.alignment = NSLayoutAttributeLeading;
-    text.spacing = 6;
-    [text setCustomSpacing:12 afterView:body];
-    NSStackView *content = [NSStackView stackViewWithViews:@[ icon, text ]];
-    content.alignment = NSLayoutAttributeTop;
-    content.spacing = 12;
-    content.edgeInsets = NSEdgeInsetsMake(14, 14, 14, 16);
-
+    NSView *content = callTipView(name, self);
     NSViewController *vc = [NSViewController new];
     vc.view = content;
     NSPopover *popover = [NSPopover new];
@@ -708,5 +727,26 @@ void SNSnapshot(const char *path) {
         [stack cacheDisplayInRect:stack.bounds toBitmapImageRep:rep];
         [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(path) atomically:YES];
         printf("wrote %lu rows to %s\n", (unsigned long)apps.count, path);
+    }
+}
+
+void SNSnapshotTip(const char *path) {
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        NSView *v = callTipView(@"Safari", nil);
+        v.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+        for (int i = 0; i < 2; i++) { // wrapped text needs its width before its height is known
+            [v layoutSubtreeIfNeeded];
+            v.frame = (NSRect){NSZeroPoint, v.fittingSize};
+        }
+        NSView *bg = [[NSView alloc] initWithFrame:v.frame];
+        bg.wantsLayer = YES;
+        bg.layer.backgroundColor = [NSColor colorWithWhite:0.17 alpha:1].CGColor;
+        bg.appearance = v.appearance;
+        [bg addSubview:v];
+        [bg layoutSubtreeIfNeeded];
+        NSBitmapImageRep *rep = [bg bitmapImageRepForCachingDisplayInRect:bg.bounds];
+        [bg cacheDisplayInRect:bg.bounds toBitmapImageRep:rep];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(path) atomically:YES];
     }
 }

@@ -32,6 +32,7 @@ func main() {
 	snapshot := flag.String("snapshot", "", "debug: render a menu row for every audio process to this PNG file")
 	welcomeShot := flag.String("snapshot-welcome", "", "debug: render the welcome window to this PNG file")
 	compare := flag.String("compare", "", "debug: alternate an app (bundle ID) between direct playback and Sonora at 100%")
+	tipShot := flag.String("snapshot-tip", "", "debug: render the call tip to this PNG file")
 	flag.Parse()
 
 	switch {
@@ -49,6 +50,10 @@ func main() {
 	case *compare != "":
 		cs := C.CString(*compare)
 		C.SNCompare(cs)
+		return
+	case *tipShot != "":
+		cs := C.CString(*tipShot)
+		C.SNSnapshotTip(cs)
 		return
 	case *list:
 		C.SNListProcesses()

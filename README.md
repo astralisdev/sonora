@@ -108,6 +108,8 @@ Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceili
 SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains, levels and dropouts
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot rows.png   # renders a menu row for every audio process
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot-welcome welcome.png   # renders the welcome window
+./build/Sonora.app/Contents/MacOS/Sonora -snapshot-tip tip.png           # renders the call tip
+./build/Sonora.app/Contents/MacOS/Sonora -compare com.apple.Safari       # direct vs Sonora at 100%, with spoken labels
 SONORA_SIMULATE_NO_PERMISSION=1 ./build/Sonora.app/Contents/MacOS/Sonora  # exercises the permission watchdog
 ```
 
