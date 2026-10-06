@@ -217,6 +217,16 @@ static void identify(SNApp *app, NSRunningApplication *ra, NSString *bundleID, p
     [cache setObject:@[ name, icon ] forKey:app.key];
 }
 
+// Some apps play their audio from a macOS daemon rather than their own
+// process: FaceTime and Phone calls (including iPhone calls relayed to the
+// Mac) come from avconferenced. Returns the app such a daemon is playing for.
+static NSString *appForDaemon(NSString *bundleID) {
+    if (![bundleID isEqualToString:@"com.apple.avconferenced"]) return nil;
+    BOOL phone = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.mobilephone"].count > 0;
+    BOOL faceTime = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.FaceTime"].count > 0;
+    return phone && !faceTime ? @"com.apple.mobilephone" : @"com.apple.FaceTime";
+}
+
 #pragma mark - Model
 
 @implementation SNApp
@@ -602,14 +612,19 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             ra = owningApp(ra.bundleIdentifier ?: bundleID) ?: ra;
         }
         NSString *key = ra.bundleIdentifier ?: bundleID ?: [NSString stringWithFormat:@"pid:%d", pid];
+        NSString *owner = appForDaemon(bundleID);
+        if (owner) {
+            key = owner;
+            ra = [NSRunningApplication runningApplicationsWithBundleIdentifier:owner].firstObject; // may be nil
+        }
 
         SNApp *app = byKey[key];
         if (!app) {
             app = [SNApp new];
             app.key = key;
             app.processObjects = @[];
-            app.isSystem = !(ra && ra.activationPolicy == NSApplicationActivationPolicyRegular);
-            identify(app, ra, ra.bundleIdentifier ?: bundleID, ra ? ra.processIdentifier : pid);
+            app.isSystem = !owner && !(ra && ra.activationPolicy == NSApplicationActivationPolicyRegular);
+            identify(app, ra, owner ?: ra.bundleIdentifier ?: bundleID, ra ? ra.processIdentifier : pid);
             byKey[key] = app;
             [ordered addObject:app];
         }

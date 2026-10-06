@@ -26,7 +26,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 - No audio driver or kernel extension to install, and no virtual device to pick. It works with whatever output you're using, including AirPods, and follows output changes automatically.
 - Apps you leave at 100% are not touched at all.
 - The menu bar title "deciphers" into the app name and level whenever you move a slider, then goes back to the plain icon. Menu rows slide in, and playing apps show bouncing activity bars (green during a call). All animation stops if macOS *Reduce Motion* is on.
-- Only regular apps are listed. macOS background processes (Siri, dictation, alert sounds) are left alone.
+- Only regular apps are listed. macOS background processes (Siri, dictation, alert sounds) are left alone, except call audio from `avconferenced`, which is shown as **FaceTime** (or **Phone** for iPhone calls when only the Phone app is open).
 - If Sonora can't capture audio (System Audio Recording denied), it stops tapping so no app is ever left silent, and the menu shows how to fix it.
 
 ## Requirements
