@@ -237,6 +237,7 @@ static void animateIn(NSView *view, NSUInteger index) {
 
     NSTextField *detail = [NSTextField wrappingLabelWithString:
         @"Allow System Audio Recording for Sonora. Volumes are paused until then."];
+    detail.selectable = NO;
     detail.font = [NSFont systemFontOfSize:10];
     detail.textColor = NSColor.secondaryLabelColor;
     detail.frame = NSMakeRect(48, 4, 240, 30);
@@ -336,7 +337,14 @@ static void animateIn(NSView *view, NSUInteger index) {
 
 - (void)callStarted:(NSNotification *)note {
     [self announce:@"CALL MODE"];
-    [self showCallTipFor:note.userInfo[@"key"] name:note.userInfo[@"name"]];
+    // Wait until the title has shrunk back to the icon, so the tip's arrow
+    // lands on Sonora's icon rather than where the wider title was.
+    NSString *key = note.userInfo[@"key"], *name = note.userInfo[@"name"];
+    __weak SNAppDelegate *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SNAppDelegate *d = weakSelf;
+        if ([SNEngine shared].callActive) [d showCallTipFor:key name:name];
+    });
 }
 
 - (void)callEnded:(NSNotification *)note {
@@ -359,12 +367,13 @@ static void animateIn(NSView *view, NSUInteger index) {
     icon.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:20 weight:NSFontWeightMedium];
     icon.contentTintColor = NSColor.systemGreenColor;
 
-    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"On a call with %@?", name]];
+    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"On a call in %@?", name]];
     title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     NSTextField *body = [NSTextField wrappingLabelWithString:
         @"Turn on Voice Isolation so they hear only your voice, not your music or the room."];
     body.font = [NSFont systemFontOfSize:11.5];
     body.textColor = NSColor.secondaryLabelColor;
+    body.selectable = NO;
     [body.widthAnchor constraintEqualToConstant:230].active = YES;
 
     NSButton *how = [NSButton buttonWithTitle:@"Show Me How" target:self action:@selector(callTipShowHow:)];
@@ -484,12 +493,17 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
         button.title = @"";
         button.imagePosition = NSImageOnly;
         _statusItem.length = NSSquareStatusItemLength;
-        return;
+    } else {
+        button.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
+            NSFontAttributeName : [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightMedium]}];
+        button.imagePosition = NSImageLeft;
+        _statusItem.length = NSVariableStatusItemLength;
     }
-    button.attributedTitle = [[NSAttributedString alloc] initWithString:text attributes:@{
-        NSFontAttributeName : [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightMedium]}];
-    button.imagePosition = NSImageLeft;
-    _statusItem.length = NSVariableStatusItemLength;
+    // Keep an open tip pointing at the button as it grows or shrinks.
+    if (_callTip.shown) {
+        [button layoutSubtreeIfNeeded];
+        _callTip.positioningRect = button.bounds;
+    }
 }
 
 #pragma mark - Menu
