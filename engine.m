@@ -43,10 +43,6 @@ static const NSTimeInterval kUnityHold = 3.0;
 // instead of the default 512 takes ~16 ms off at 48 kHz for little CPU.
 static const UInt32 kIOBufferFrames = 128;
 
-// Speech loudness that voice leveling aims for at 100% call volume (dBFS RMS,
-// a little louder than a typical podcast). The call slider moves it down.
-static const float kVoiceLevelDB = -16;
-
 #pragma mark - Core Audio helpers
 
 static AudioObjectPropertyAddress addr(AudioObjectPropertySelector sel, AudioObjectPropertyScope scope) {
@@ -110,8 +106,8 @@ typedef NS_ENUM(int, SNVoiceProcessing) {
     SNVoiceProcessingListed,
     // Later in a call the processing can move to a private device that macOS
     // doesn't list: the process records and plays but reports no devices at
-    // all. Taps then get the call at its final level. (Apps that only read
-    // taps, like Sonora, still list the output device they play to.)
+    // all. (Apps that only read taps, like Sonora, still list the output
+    // device they play to.)
     SNVoiceProcessingPrivate,
 };
 
@@ -251,9 +247,6 @@ static NSString *appForDaemon(NSString *bundleID) {
 #pragma mark - Model
 
 @implementation SNApp
-- (NSString *)settingsKey {
-    return self.inCall ? [self.key stringByAppendingString:@"@call"] : self.key;
-}
 @end
 
 #pragma mark - Real-time render
@@ -261,7 +254,6 @@ static NSString *appForDaemon(NSString *bundleID) {
 typedef struct {
     UInt32 tapBuffers;   // the tap's buffers are the last ones in the input list
     _Atomic bool heard;  // any non-silent input yet (permission watchdog)
-    _Atomic uint64_t quietFrames; // frames since the input last had audible sound
     SNDSP dsp;
 } SNRender;
 
@@ -308,14 +300,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     if (frames == UINT32_MAX) return;
     if (frames > SN_MAX_FRAMES) frames = SN_MAX_FRAMES;
 
-    // Is this app actually making sound (above -60 dBFS), or just holding a stream open?
-    BOOL audible = NO;
-    for (UInt32 i = 0; srcL && i < inFrames && !audible; i++) {
-        audible = fabsf(srcL[i * strideL]) > 0.001f || (srcR && fabsf(srcR[i * strideR]) > 0.001f);
-    }
-    if (audible) atomic_store_explicit(&r->quietFrames, 0, memory_order_relaxed);
-    else atomic_fetch_add_explicit(&r->quietFrames, frames, memory_order_relaxed);
-
     if (srcL && !gSimulateNoPermission && !atomic_load_explicit(&r->heard, memory_order_relaxed)) {
         for (UInt32 i = 0; i < inFrames; i++) {
             if (srcL[i * strideL] != 0 || (srcR && srcR[i * strideR] != 0)) {
@@ -351,7 +335,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 @property(nonatomic, readonly) SNRender *render;
 @property(nonatomic, readonly) CFAbsoluteTime created;
 @property(nonatomic, readonly) BOOL heard;
-@property(nonatomic, readonly) double quietSeconds; // how long the app has been silent
 @end
 
 @implementation SNTap {
@@ -461,9 +444,9 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     SNDSP *r = &_render->dsp;
     double n = r->count ? (double)r->count : 1;
     NSString *s = [NSString stringWithFormat:
-        @"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | limiter %5.1f dB | leveling %+5.1f dB | gain %.3f",
+        @"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | limiter %5.1f dB | gain %.3f",
         dB(sqrt(r->inSq / n)), dB(r->inPeak), dB(sqrt(r->outSq / n)), dB(r->outPeak), dB(r->minLimit),
-        dB(r->level), atomic_load(&r->target)];
+        atomic_load(&r->target)];
     r->inSq = r->outSq = 0; r->inPeak = r->outPeak = 0; r->count = 0; r->minLimit = 1;
     return s;
 }
@@ -472,16 +455,8 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     sn_dsp_set_gain(&_render->dsp, gain);
 }
 
-- (void)setLeveling:(BOOL)on {
-    sn_dsp_set_leveling(&_render->dsp, on ? kVoiceLevelDB : NAN);
-}
-
 - (BOOL)heard {
     return atomic_load_explicit(&_render->heard, memory_order_relaxed);
-}
-
-- (double)quietSeconds {
-    return atomic_load_explicit(&_render->quietFrames, memory_order_relaxed) / _render->dsp.sampleRate;
 }
 
 - (float)gain {
@@ -528,8 +503,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     BOOL _callWasActive;
     NSDictionary *_caller;  // key/name of the app in the current call
     NSMutableSet<NSString *> *_callLatch; // apps in a call (main thread only)
-    NSSet<NSString *> *_tappedKeys;         // apps with a live tap, and which of them
-    NSSet<NSString *> *_soundingKeys;       // made sound recently (main thread copies)
     float _duck;            // current extra gain for non-call apps while a call is active (1 = none)
     double _duckDB;         // the same, in dB of reduction (0 = none), which is what fades
     double _fadeFrom, _fadeTo;            // dB of the fade in progress
@@ -554,8 +527,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     _apps = @[];
     _duck = 1;
     _callLatch = [NSMutableSet new];
-    _tappedKeys = [NSSet set];
-    _soundingKeys = [NSSet set];
     return self;
 }
 
@@ -669,12 +640,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 
     // Listeners cover starts/stops; the timer handles grace-period expiry.
     _timer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) { [weakSelf refresh]; }];
-    // During a call, check twice a second whether other apps are making sound.
-    NSTimer *activity = [NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
-        SNEngine *e = weakSelf;
-        if (e.callActive) [e updateActivity];
-    }];
-    [NSRunLoop.mainRunLoop addTimer:activity forMode:NSRunLoopCommonModes];
     _timer.tolerance = 0.5;
     [self refresh];
 }
@@ -798,7 +763,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     };
     BOOL changed = ![signature(_apps) isEqualToString:signature(visible)];
     _apps = visible;
-    [self updateActivity];
     SNApp *caller = nil;
     for (SNApp *app in visible) if (app.inCall) caller = app;
     if (caller && !_callWasActive) {
@@ -817,77 +781,31 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     if (changed) [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineAppsDidChangeNotification object:self];
 }
 
-// Refreshes which tapped apps are actually making sound, and re-applies if that
-// changed (it decides whether a call is left alone; see apply).
-- (void)updateActivity {
-    __weak SNEngine *weakSelf = self;
-    dispatch_async(_tapQueue, ^{
-        SNEngine *e = weakSelf;
-        if (!e) return;
-        NSMutableSet *tapped = [NSMutableSet new], *sounding = [NSMutableSet new];
-        for (NSString *key in e->_taps) {
-            [tapped addObject:key];
-            if (e->_taps[key].quietSeconds < 1.5) [sounding addObject:key];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            BOOL before = e.otherAppsSounding;
-            e->_tappedKeys = tapped;
-            e->_soundingKeys = sounding;
-            if (e.otherAppsSounding != before) {
-                if (gDiag) NSLog(@"sonora[debug] other apps sounding: %d", !before);
-                [e apply];
-            }
-        });
-    });
-}
-
 // Pushes the current settings for the visible apps to the tap queue. Cheap
 // enough to call on every slider tick.
-// YES if an app other than the one in the call is actually making sound. An
-// app can keep its audio stream running while paused, so for tapped apps this
-// uses what the tap hears; untapped apps are taken at their word.
-- (BOOL)otherAppsSounding {
-    for (SNApp *app in _apps) {
-        if (app.inCall || !app.playing) continue;
-        if (![_tappedKeys containsObject:app.key] || [_soundingKeys containsObject:app.key]) return YES;
-    }
-    return NO;
-}
-
 - (void)apply {
     NSDate *now = [NSDate date];
-    BOOL othersSounding = self.otherAppsSounding;
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
     for (SNApp *app in _permissionProblem ? @[] : _apps) {
-        // A call with nothing else playing has nothing to be balanced against:
-        // Sonora steps aside and the call sounds exactly as it would without it.
-        if (app.inCall && !othersSounding) {
+        // The call itself is never replayed: macOS can make call audio louder
+        // after the point where Sonora reads it, so a replayed call always comes
+        // out quieter than the app's own sound. Calls play exactly as the app
+        // sends them, and Sonora balances everything else around them.
+        if (app.inCall) {
             [_lastNonUnity removeObjectForKey:app.key];
             continue;
         }
-        double volume = [self volumeForKey:app.settingsKey];
-        BOOL level = NO;
-        if (app.inCall) {
-            // At 100% the call is left untouched (native loudness, no delay);
-            // lower settings turn it down from there.
-            level = snEvenOutVoices(); // opt-in: leveling needs the tap
-            if (volume >= 100 && ![self mutedForKey:app.settingsKey] && !level) {
-                [_lastNonUnity removeObjectForKey:app.key];
-                continue;
-            }
-        }
-        float gain = sn_gain_for_percent(volume, [self mutedForKey:app.settingsKey]);
-        if (!app.inCall) gain *= _duck; // lowered while a call is going on
+        float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]) * _duck;
         // During a call macOS turns other apps down on its own (part of the call's
         // voice processing). Audio Sonora plays isn't affected, so carrying the
         // other apps through Sonora keeps them as loud as outside the call, and
         // the During Calls setting becomes the real amount they're lowered by.
-        BOOL carry = self.callActive && !app.inCall && app.playing;
-        if (gain != 1.f || level || carry) _lastNonUnity[app.key] = now;
+        BOOL carry = self.callActive && app.playing;
+        if (gain != 1.f || carry) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
-        if (gain == 1.f && !level && !carry && !holding) continue;
-        wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain), @"level" : @(level)};
+        if (gain == 1.f && !carry && !holding) continue;
+        wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
     [self reconcile:wanted outputUID:_outputUID];
 }
@@ -919,7 +837,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
                 self->_taps[key] = tap;
                 if (gDiag) NSLog(@"sonora[debug] create tap %@ gain %.3f", key, gain);
             }
-            [tap setLeveling:[w[@"level"] boolValue]];
         }];
     });
 }
@@ -932,13 +849,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 }
 
 - (double)callDuckDB { return snCallDuckDB(); }
-
-- (BOOL)evenOutVoices { return snEvenOutVoices(); }
-
-- (void)setEvenOutVoices:(BOOL)on {
-    snSetEvenOutVoices(on);
-    [self apply];
-}
 
 - (void)setCallDuckDB:(double)dB {
     snSetCallDuckDB(dB);

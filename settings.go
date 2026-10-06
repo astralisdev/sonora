@@ -30,15 +30,13 @@ type store struct {
 	path  string
 	apps  map[string]AppSetting
 	duck  *float64 // callDuckDB from settings.json
-	even  *bool    // evenOutVoices from settings.json
 	timer *time.Timer
 }
 
 // settingsFile is the on-disk layout of settings.json.
 type settingsFile struct {
-	Apps          map[string]AppSetting `json:"apps"`
-	CallDuckDB    *float64              `json:"callDuckDB,omitempty"`
-	EvenOutVoices *bool                 `json:"evenOutVoices,omitempty"`
+	Apps       map[string]AppSetting `json:"apps"`
+	CallDuckDB *float64              `json:"callDuckDB,omitempty"`
 }
 
 var settings = &store{apps: map[string]AppSetting{}}
@@ -77,7 +75,6 @@ func (s *store) load() error {
 		a.Volume = math.Max(0, math.Min(a.Volume, 100)) // 100% = the app's own level
 		s.apps[k] = a
 	}
-	s.even = file.EvenOutVoices
 	if d := file.CallDuckDB; d != nil && !math.IsNaN(*d) {
 		v := math.Max(0, math.Min(*d, 100))
 		s.duck = &v
@@ -99,7 +96,7 @@ func (s *store) scheduleSave() {
 
 func (s *store) save() {
 	s.mu.Lock()
-	data, err := json.MarshalIndent(settingsFile{Apps: s.apps, CallDuckDB: s.duck, EvenOutVoices: s.even}, "", "  ")
+	data, err := json.MarshalIndent(settingsFile{Apps: s.apps, CallDuckDB: s.duck}, "", "  ")
 	path := s.path
 	s.mu.Unlock()
 	if err != nil {
@@ -174,21 +171,5 @@ func snSetCallDuckDB(dB C.double) {
 	defer settings.mu.Unlock()
 	v := math.Max(0, math.Min(float64(dB), 100))
 	settings.duck = &v
-	settings.scheduleSave()
-}
-
-//export snEvenOutVoices
-func snEvenOutVoices() C.bool {
-	settings.mu.Lock()
-	defer settings.mu.Unlock()
-	return C.bool(settings.even != nil && *settings.even) // off unless chosen
-}
-
-//export snSetEvenOutVoices
-func snSetEvenOutVoices(on C.bool) {
-	settings.mu.Lock()
-	defer settings.mu.Unlock()
-	v := bool(on)
-	settings.even = &v
 	settings.scheduleSave()
 }

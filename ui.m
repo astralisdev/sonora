@@ -126,13 +126,13 @@ static void animateIn(NSView *view, NSUInteger index) {
     NSTextField *_name, *_percent;
     NSSlider *_slider;
     SNActivityView *_activity;
-    BOOL _muted;
+    BOOL _muted, _inCall;
 }
 
 - (instancetype)initWithApp:(SNApp *)app {
     if (!(self = [super initWithFrame:NSMakeRect(0, 0, kRowWidth, kRowHeight)])) return nil;
     self.wantsLayer = YES;
-    _key = app.settingsKey;
+    _key = app.key;
     SNEngine *engine = [SNEngine shared];
     _muted = [engine mutedForKey:_key];
     NSString *title = app.name ?: app.key;
@@ -164,6 +164,7 @@ static void animateIn(NSView *view, NSUInteger index) {
     _slider = [NSSlider sliderWithValue:fmin([engine volumeForKey:_key], kMaxVolume) minValue:0 maxValue:kMaxVolume
                                  target:self action:@selector(sliderMoved:)];
     _slider.toolTip = @"100% is the app exactly as it sounds without Sonora. Slide left to turn it down.";
+    _inCall = app.inCall;
     _slider.frame = NSMakeRect(48, 3, 196, 20);
     _slider.controlSize = NSControlSizeSmall;
     _slider.continuous = YES;
@@ -186,6 +187,17 @@ static void animateIn(NSView *view, NSUInteger index) {
 }
 
 - (void)updateLabelsAnimated:(BOOL)animated {
+    if (_inCall) {
+        // The call always plays exactly as the app sends it (see SNEngine apply).
+        _slider.doubleValue = 100;
+        _slider.enabled = NO;
+        _iconButton.enabled = NO;
+        _slider.toolTip = _iconButton.toolTip =
+            @"The call plays exactly as the app sends it. Sonora balances your other apps around it.";
+        _percent.stringValue = @"100%";
+        _percent.textColor = NSColor.secondaryLabelColor;
+        return;
+    }
     _percent.stringValue = _muted ? @"Muted" : [NSString stringWithFormat:@"%d%%", (int)lround(_slider.doubleValue)];
     _percent.textColor = _muted ? NSColor.secondaryLabelColor : NSColor.labelColor;
     _slider.enabled = !_muted;
@@ -442,7 +454,7 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 - (void)volumeChanged:(NSNotification *)note {
     NSString *key = note.userInfo[@"key"];
     NSString *name = key;
-    for (SNApp *app in [SNEngine shared].apps) if ([app.settingsKey isEqualToString:key]) name = app.name;
+    for (SNApp *app in [SNEngine shared].apps) if ([app.key isEqualToString:key]) name = app.name;
     name = name.uppercaseString;
     if (name.length > 12) name = [[name substringToIndex:11] stringByAppendingString:@"…"];
     BOOL muted = [note.userInfo[@"muted"] boolValue];
@@ -580,13 +592,6 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
         item.state = fabs([choice[1] doubleValue] - current) < 0.5 ? NSControlStateValueOn : NSControlStateValueOff;
         [duckMenu addItem:item];
     }
-    [duckMenu addItem:NSMenuItem.separatorItem];
-    NSMenuItem *even = [[NSMenuItem alloc] initWithTitle:@"Even Out Voices" action:@selector(toggleEvenOutVoices:) keyEquivalent:@""];
-    even.target = self;
-    even.state = engine.evenOutVoices ? NSControlStateValueOn : NSControlStateValueOff;
-    even.toolTip = @"Keeps everyone in the call at the same loudness, even when people join or leave "
-                   @"or speak softly. Can be quieter than the call app's own sound.";
-    [duckMenu addItem:even];
     duckItem.submenu = duckMenu;
     [_menu addItem:duckItem];
 
@@ -659,11 +664,6 @@ static NSString *controlCenterString(NSString *key, NSString *fallback) {
     [alert addButtonWithTitle:@"OK"];
     [NSApp activateIgnoringOtherApps:YES];
     [alert runModal];
-}
-
-- (void)toggleEvenOutVoices:(id)sender {
-    SNEngine *engine = [SNEngine shared];
-    engine.evenOutVoices = !engine.evenOutVoices;
 }
 
 - (void)setCallDuck:(NSMenuItem *)sender {

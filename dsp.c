@@ -24,54 +24,10 @@ void sn_dsp_init(SNDSP *d, float gain, double sampleRate) {
     for (int i = 0; i < SN_LOOKAHEAD; i++) d->hold[i] = d->box[i] = 1;
     d->boxSum = SN_LOOKAHEAD;
     d->minLimit = 1;
-    d->level = 1;
-    d->sampleRate = sr;
 }
 
 void sn_dsp_set_gain(SNDSP *d, float gain) {
     atomic_store_explicit(&d->target, gain, memory_order_relaxed);
-}
-
-void sn_dsp_set_leveling(SNDSP *d, float targetDB) {
-    float ms = isnan(targetDB) ? 0 : powf(10.f, targetDB / 10.f); // dB RMS → mean square
-    atomic_store_explicit(&d->levelTarget, ms, memory_order_relaxed);
-}
-
-// One-pole coefficient for a time constant of `tau` seconds over `frames` frames.
-static float coef(double tau, unsigned frames, double sampleRate) {
-    return (float)(1.0 - exp(-(double)frames / (tau * sampleRate)));
-}
-
-// Works out this block's leveling gain from how loud the input is. Measured per
-// block: speech loudness moves slowly, and the gain is ramped across the block.
-static float levelingGain(SNDSP *d, const float *srcL, unsigned strideL, const float *srcR, unsigned strideR,
-                          unsigned inFrames, unsigned total) {
-    float target = atomic_load_explicit(&d->levelTarget, memory_order_relaxed);
-    if (target <= 0) {
-        // Off: settle back to unity in about 50 ms.
-        d->level += (1.f - d->level) * coef(0.05, total, d->sampleRate);
-        if (fabsf(d->level - 1.f) < 1e-4f) d->level = 1.f;
-        return d->level;
-    }
-    if (d->levelEnv <= 0) d->levelEnv = target; // first block: start neutral
-
-    double sum = 0;
-    for (unsigned i = 0; i < inFrames; i++) {
-        float l = srcL[i * strideL], r = srcR[i * strideR];
-        sum += 0.5 * ((double)l * l + (double)r * r);
-    }
-    float ms = inFrames ? (float)(sum / inFrames) : 0;
-    if (ms > powf(10.f, SN_LEVEL_GATE_DB / 10.f)) {
-        // Someone is talking: follow their loudness, then steer the gain.
-        d->levelEnv += (ms - d->levelEnv) * coef(0.4, total, d->sampleRate);
-        float want = sqrtf(target / d->levelEnv);
-        want = fminf(fmaxf(want, powf(10.f, SN_LEVEL_MIN_DB / 20.f)), powf(10.f, SN_LEVEL_MAX_DB / 20.f));
-        // Turn down quickly when someone is loud, up slowly so pauses and
-        // breaths don't pump.
-        float c = coef(want < d->level ? 0.3 : 2.0, total, d->sampleRate);
-        d->level += (want - d->level) * c;
-    }
-    return d->level;
 }
 
 void sn_dsp_process(SNDSP *d, const float *srcL, unsigned strideL, const float *srcR, unsigned strideR,
@@ -80,13 +36,8 @@ void sn_dsp_process(SNDSP *d, const float *srcL, unsigned strideL, const float *
     if (!srcL) inFrames = 0;
     if (!srcR) { srcR = srcL; strideR = strideL; }
 
-    float levelFrom = d->level;
-    float levelTo = levelingGain(d, srcL, strideL, srcR, strideR, inFrames, total);
-
-    // User gain × leveling gain, both ramped across the block so nothing steps.
     float target = atomic_load_explicit(&d->target, memory_order_relaxed);
-    float startGain = d->current * levelFrom, endGain = target * levelTo;
-    float g = startGain, step = total ? (endGain - startGain) / (float)total : 0;
+    float g = d->current, step = total ? (target - d->current) / (float)total : 0; // de-zipper ramp
     float rel = d->release, boxSum = d->boxSum, coef = d->releaseCoef;
     unsigned pos = d->pos;
 
