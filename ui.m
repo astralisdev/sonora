@@ -579,11 +579,11 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 
     // During calls: how much to lower everything except the call.
     NSMenuItem *duckItem = [[NSMenuItem alloc] initWithTitle:@"During Calls" action:nil keyEquivalent:@""];
-    duckItem.toolTip = @"How loud other apps are while you're in a call, compared with outside a call. "
-                       @"(macOS turns them down on its own; Sonora keeps them where you choose.)";
+    duckItem.toolTip = @"Turn other apps down while you're in a call, so music from your speakers "
+                       @"doesn't reach your microphone.";
     NSMenu *duckMenu = [NSMenu new];
     double current = engine.callDuckDB;
-    NSArray *choices = @[ @[ @"Keep Other Apps as Loud as Usual", @0 ], @[ @"Lower Other Apps a Little", @6 ],
+    NSArray *choices = @[ @[ @"Leave Other Apps Alone", @0 ], @[ @"Lower Other Apps a Little", @6 ],
                           @[ @"Lower Other Apps a Lot", @12 ], @[ @"Mute Other Apps", @100 ] ];
     for (NSArray *choice in choices) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:choice[0] action:@selector(setCallDuck:) keyEquivalent:@""];

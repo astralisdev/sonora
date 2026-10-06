@@ -795,16 +795,15 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             [_lastNonUnity removeObjectForKey:app.key];
             continue;
         }
+        // At 100% an app is left untouched, during calls too. (During a call macOS
+        // turns other apps down by an amount that depends on the call app's own
+        // settings, and audio replayed through Sonora can be turned down far more
+        // than the app's own sound, so only direct playback is reliably 1:1.)
         float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]) * _duck;
-        // During a call macOS turns other apps down on its own (part of the call's
-        // voice processing). Audio Sonora plays isn't affected, so carrying the
-        // other apps through Sonora keeps them as loud as outside the call, and
-        // the During Calls setting becomes the real amount they're lowered by.
-        BOOL carry = self.callActive && app.playing;
-        if (gain != 1.f || carry) _lastNonUnity[app.key] = now;
+        if (gain != 1.f) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
-        if (gain == 1.f && !carry && !holding) continue;
+        if (gain == 1.f && !holding) continue;
         wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
     [self reconcile:wanted outputUID:_outputUID];
