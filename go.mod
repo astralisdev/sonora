@@ -1,3 +1,3 @@
-module github.com/astralisdev/tapmix
+module github.com/astralisdev/sonora
 
 go 1.22

@@ -1,4 +1,4 @@
-// Tapmix is a macOS menu bar app that controls the volume of each app separately.
+// Sonora is a macOS menu bar app that controls the volume of each app separately.
 //
 // The audio work is done with Core Audio process taps (macOS 14.2+): an app's
 // output is captured by a private tap, scaled by the chosen gain, and played back
@@ -8,7 +8,7 @@ package main
 /*
 #cgo CFLAGS: -fobjc-arc -Wno-unused-command-line-argument
 #cgo LDFLAGS: -framework Cocoa -framework CoreAudio -framework ServiceManagement
-#include "tapmix.h"
+#include "sonora.h"
 */
 import "C"
 
@@ -33,15 +33,15 @@ func main() {
 
 	switch {
 	case *showVersion:
-		fmt.Println("Tapmix", version)
+		fmt.Println("Sonora", version)
 		return
 	case *list:
-		C.TMListProcesses()
+		C.SNListProcesses()
 		return
 	}
 
 	if err := settings.load(); err != nil {
-		fmt.Fprintln(os.Stderr, "tapmix: could not load settings:", err)
+		fmt.Fprintln(os.Stderr, "sonora: could not load settings:", err)
 	}
-	C.TMRun()
+	C.SNRun()
 }

@@ -1,12 +1,12 @@
 // engine.m — per-app volume using Core Audio process taps (macOS 14.2+).
 //
-// For every app whose volume is not 100%, Tapmix creates:
+// For every app whose volume is not 100%, Sonora creates:
 //   1. a private process tap over all of the app's audio processes, which
-//      mutes the app's own output while Tapmix is reading from it, and
+//      mutes the app's own output while Sonora is reading from it, and
 //   2. a private aggregate device made of the current output device plus
 //      that tap, whose IOProc copies the tapped audio to the output scaled
 //      by the app's gain.
-// Apps at 100% are left untouched, so Tapmix adds no latency to them.
+// Apps at 100% are left untouched, so Sonora adds no latency to them.
 
 #import "engine.h"
 #import <CoreAudio/AudioHardwareTapping.h>
@@ -16,7 +16,7 @@
 #include <stdatomic.h>
 #include "_cgo_export.h"
 
-NSNotificationName const TMEngineAppsDidChangeNotification = @"TMEngineAppsDidChange";
+NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidChange";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
 // video doesn't rebuild the tap every time.
@@ -96,7 +96,7 @@ static float gainFor(double percent, BOOL muted) {
 
 #pragma mark - Model
 
-@implementation TMApp
+@implementation SNApp
 @end
 
 #pragma mark - Real-time render
@@ -105,12 +105,12 @@ typedef struct {
     _Atomic float target;
     float current;
     UInt32 tapBuffers; // the tap's buffers are the last ones in the input list
-} TMRender;
+} SNRender;
 
 enum { kMaxChannels = 16 };
 
 // Runs on Core Audio's real-time thread: no locks, no allocation, no ObjC.
-static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out) {
+static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out) {
     float target = atomic_load_explicit(&r->target, memory_order_relaxed);
 
     const float *src[kMaxChannels];
@@ -161,13 +161,13 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
 #pragma mark - Tap
 
 // One live tap + aggregate device. Created and destroyed only on the engine's tap queue.
-@interface TMTap : NSObject
+@interface SNTap : NSObject
 @property(nonatomic, copy) NSArray<NSNumber *> *processes;
 @property(nonatomic, copy) NSString *outputUID;
-@property(nonatomic) TMRender *render;
+@property(nonatomic) SNRender *render;
 @end
 
-@implementation TMTap {
+@implementation SNTap {
     AudioObjectID _tapID, _aggID;
     AudioDeviceIOProcID _procID;
 }
@@ -177,21 +177,21 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     if (!(self = [super init])) return nil;
     _processes = [processes copy];
     _outputUID = [outputUID copy];
-    _render = calloc(1, sizeof(TMRender));
+    _render = calloc(1, sizeof(SNRender));
     atomic_store(&_render->target, gain);
     _render->current = gain;
     _render->tapBuffers = 1;
 
     CATapDescription *desc = [[CATapDescription alloc] initStereoMixdownOfProcesses:processes];
-    desc.name = [@"Tapmix " stringByAppendingString:key];
+    desc.name = [@"Sonora " stringByAppendingString:key];
     desc.privateTap = YES;
-    // Muted only while Tapmix reads the tap: if Tapmix stops or crashes the
+    // Muted only while Sonora reads the tap: if Sonora stops or crashes the
     // app is audible again rather than silenced.
     desc.muteBehavior = CATapMutedWhenTapped;
 
     OSStatus err = AudioHardwareCreateProcessTap(desc, &_tapID);
     if (err != noErr) {
-        NSLog(@"tapmix: creating tap for %@ failed (%d)", key, (int)err);
+        NSLog(@"sonora: creating tap for %@ failed (%d)", key, (int)err);
         [self teardown];
         return nil;
     }
@@ -205,8 +205,8 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     }
 
     NSDictionary *agg = @{
-        @kAudioAggregateDeviceNameKey : [@"Tapmix " stringByAppendingString:key],
-        @kAudioAggregateDeviceUIDKey : [@"tapmix-" stringByAppendingString:[NSUUID UUID].UUIDString],
+        @kAudioAggregateDeviceNameKey : [@"Sonora " stringByAppendingString:key],
+        @kAudioAggregateDeviceUIDKey : [@"sonora-" stringByAppendingString:[NSUUID UUID].UUIDString],
         @kAudioAggregateDeviceMainSubDeviceKey : outputUID,
         @kAudioAggregateDeviceIsPrivateKey : @YES,
         @kAudioAggregateDeviceIsStackedKey : @NO,
@@ -219,12 +219,12 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     };
     err = AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)agg, &_aggID);
     if (err != noErr) {
-        NSLog(@"tapmix: creating aggregate device for %@ failed (%d)", key, (int)err);
+        NSLog(@"sonora: creating aggregate device for %@ failed (%d)", key, (int)err);
         [self teardown];
         return nil;
     }
 
-    TMRender *r = _render;
+    SNRender *r = _render;
     err = AudioDeviceCreateIOProcIDWithBlock(&_procID, _aggID, NULL,
         ^(const AudioTimeStamp *now, const AudioBufferList *inData, const AudioTimeStamp *inTime,
           AudioBufferList *outData, const AudioTimeStamp *outTime) {
@@ -232,7 +232,7 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
         });
     if (err == noErr) err = AudioDeviceStart(_aggID, _procID);
     if (err != noErr) {
-        NSLog(@"tapmix: starting audio for %@ failed (%d)", key, (int)err);
+        NSLog(@"sonora: starting audio for %@ failed (%d)", key, (int)err);
         [self teardown];
         return nil;
     }
@@ -268,27 +268,27 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
 
 #pragma mark - Engine
 
-@implementation TMEngine {
+@implementation SNEngine {
     dispatch_queue_t _tapQueue;
-    NSMutableDictionary<NSString *, TMTap *> *_taps;          // tap queue only
+    NSMutableDictionary<NSString *, SNTap *> *_taps;          // tap queue only
     NSMutableDictionary<NSString *, NSDate *> *_lastPlaying;  // main thread only
     NSMutableSet<NSNumber *> *_observedProcesses;             // main thread only
-    NSArray<TMApp *> *_apps;
+    NSArray<SNApp *> *_apps;
     NSString *_outputDeviceName;
     NSString *_outputUID;
     NSTimer *_timer;
 }
 
 + (instancetype)shared {
-    static TMEngine *engine;
+    static SNEngine *engine;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ engine = [TMEngine new]; });
+    dispatch_once(&once, ^{ engine = [SNEngine new]; });
     return engine;
 }
 
 - (instancetype)init {
     if (!(self = [super init])) return nil;
-    _tapQueue = dispatch_queue_create("tapmix.taps", DISPATCH_QUEUE_SERIAL);
+    _tapQueue = dispatch_queue_create("sonora.taps", DISPATCH_QUEUE_SERIAL);
     _taps = [NSMutableDictionary new];
     _lastPlaying = [NSMutableDictionary new];
     _observedProcesses = [NSMutableSet new];
@@ -296,11 +296,11 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     return self;
 }
 
-- (NSArray<TMApp *> *)apps { return _apps; }
+- (NSArray<SNApp *> *)apps { return _apps; }
 - (NSString *)outputDeviceName { return _outputDeviceName; }
 
 - (void)start {
-    __weak TMEngine *weakSelf = self;
+    __weak SNEngine *weakSelf = self;
     AudioObjectPropertyListenerBlock refresh = ^(UInt32 n, const AudioObjectPropertyAddress *a) {
         [weakSelf refresh];
     };
@@ -315,10 +315,10 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     [self refresh];
 }
 
-+ (NSArray<TMApp *> *)scanApps {
++ (NSArray<SNApp *> *)scanApps {
     pid_t me = getpid();
-    NSMutableDictionary<NSString *, TMApp *> *byKey = [NSMutableDictionary new];
-    NSMutableArray<TMApp *> *ordered = [NSMutableArray new];
+    NSMutableDictionary<NSString *, SNApp *> *byKey = [NSMutableDictionary new];
+    NSMutableArray<SNApp *> *ordered = [NSMutableArray new];
 
     for (NSNumber *obj in readObjectList(kAudioObjectSystemObject, kAudioHardwarePropertyProcessObjectList)) {
         AudioObjectID pobj = obj.unsignedIntValue;
@@ -334,9 +334,9 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
         }
         NSString *key = ra.bundleIdentifier ?: bundleID ?: [NSString stringWithFormat:@"pid:%d", pid];
 
-        TMApp *app = byKey[key];
+        SNApp *app = byKey[key];
         if (!app) {
-            app = [TMApp new];
+            app = [SNApp new];
             app.key = key;
             app.processObjects = @[];
             app.name = [ra.localizedName stringByTrimmingCharactersInSet:NSCharacterSet.controlCharacterSet];
@@ -356,12 +356,12 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
 }
 
 - (void)refresh {
-    NSArray<TMApp *> *scanned = [TMEngine scanApps];
+    NSArray<SNApp *> *scanned = [SNEngine scanApps];
 
     // Watch each process's "is running output" flag so play/pause is noticed immediately.
-    __weak TMEngine *weakSelf = self;
+    __weak SNEngine *weakSelf = self;
     NSMutableSet *current = [NSMutableSet new];
-    for (TMApp *app in scanned) {
+    for (SNApp *app in scanned) {
         for (NSNumber *obj in app.processObjects) {
             [current addObject:obj];
             if ([_observedProcesses containsObject:obj]) continue;
@@ -373,13 +373,13 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     [_observedProcesses setSet:current]; // dead process objects take their listeners with them
 
     NSDate *now = [NSDate date];
-    NSMutableArray<TMApp *> *visible = [NSMutableArray new];
-    for (TMApp *app in scanned) {
+    NSMutableArray<SNApp *> *visible = [NSMutableArray new];
+    for (SNApp *app in scanned) {
         if (app.playing) _lastPlaying[app.key] = now;
         NSDate *last = _lastPlaying[app.key];
         if (last && [now timeIntervalSinceDate:last] < kTapGracePeriod) [visible addObject:app];
     }
-    [visible sortUsingComparator:^NSComparisonResult(TMApp *a, TMApp *b) {
+    [visible sortUsingComparator:^NSComparisonResult(SNApp *a, SNApp *b) {
         return [a.name localizedCaseInsensitiveCompare:b.name];
     }];
 
@@ -390,14 +390,14 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
     BOOL changed = ![[_apps valueForKey:@"key"] isEqual:[visible valueForKey:@"key"]];
     _apps = visible;
     [self apply];
-    if (changed) [[NSNotificationCenter defaultCenter] postNotificationName:TMEngineAppsDidChangeNotification object:self];
+    if (changed) [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineAppsDidChangeNotification object:self];
 }
 
 // Pushes the current settings for the visible apps to the tap queue. Cheap
 // enough to call on every slider tick.
 - (void)apply {
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
-    for (TMApp *app in _apps) {
+    for (SNApp *app in _apps) {
         float gain = gainFor([self volumeForKey:app.key], [self mutedForKey:app.key]);
         if (gain != 1.f) wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
@@ -408,7 +408,7 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
 - (void)reconcile:(NSDictionary<NSString *, NSDictionary *> *)wanted outputUID:(NSString *)outputUID {
     dispatch_async(_tapQueue, ^{
         for (NSString *key in self->_taps.allKeys) {
-            TMTap *tap = self->_taps[key];
+            SNTap *tap = self->_taps[key];
             NSDictionary *w = wanted[key];
             if (!w || !outputUID || ![tap.processes isEqual:w[@"processes"]] || ![tap.outputUID isEqual:outputUID]) {
                 [self->_taps removeObjectForKey:key]; // dealloc tears it down
@@ -417,10 +417,10 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
         if (!outputUID) return;
         [wanted enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSDictionary *w, BOOL *stop) {
             float gain = [w[@"gain"] floatValue];
-            TMTap *tap = self->_taps[key];
+            SNTap *tap = self->_taps[key];
             if (tap) {
                 [tap setGain:gain];
-            } else if ((tap = [[TMTap alloc] initWithKey:key processes:w[@"processes"] outputUID:outputUID gain:gain])) {
+            } else if ((tap = [[SNTap alloc] initWithKey:key processes:w[@"processes"] outputUID:outputUID gain:gain])) {
                 self->_taps[key] = tap;
             }
         }];
@@ -430,37 +430,37 @@ static void render(TMRender *r, const AudioBufferList *in, AudioBufferList *out)
 - (double)volumeForKey:(NSString *)key {
     double v = 100;
     bool muted = false;
-    return tmGetSetting((char *)key.UTF8String, &v, &muted) ? v : 100;
+    return snGetSetting((char *)key.UTF8String, &v, &muted) ? v : 100;
 }
 
 - (BOOL)mutedForKey:(NSString *)key {
     double v = 100;
     bool muted = false;
-    return tmGetSetting((char *)key.UTF8String, &v, &muted) && muted;
+    return snGetSetting((char *)key.UTF8String, &v, &muted) && muted;
 }
 
 - (void)setVolume:(double)percent muted:(BOOL)muted forKey:(NSString *)key {
-    tmSetSetting((char *)key.UTF8String, percent, muted);
+    snSetSetting((char *)key.UTF8String, percent, muted);
     [self apply];
 }
 
 - (void)resetAll {
-    tmResetAll();
+    snResetAll();
     [self refresh];
 }
 
 - (void)shutdown {
     [_timer invalidate];
     dispatch_sync(_tapQueue, ^{ [self->_taps removeAllObjects]; });
-    tmFlush();
+    snFlush();
 }
 @end
 
 #pragma mark - CLI
 
-void TMListProcesses(void) {
+void SNListProcesses(void) {
     @autoreleasepool {
-        for (TMApp *app in [TMEngine scanApps]) {
+        for (SNApp *app in [SNEngine scanApps]) {
             printf("%-8s %-40s %s (%lu process%s)\n", app.playing ? "PLAYING" : "-", app.key.UTF8String,
                    app.name.UTF8String, (unsigned long)app.processObjects.count,
                    app.processObjects.count == 1 ? "" : "es");

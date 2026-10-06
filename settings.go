@@ -33,7 +33,7 @@ func settingsPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "Tapmix", "settings.json"), nil
+	return filepath.Join(dir, "Sonora", "settings.json"), nil
 }
 
 func (s *store) load() error {
@@ -94,8 +94,8 @@ func (s *store) save() {
 	}
 }
 
-//export tmGetSetting
-func tmGetSetting(key *C.char, volume *C.double, muted *C.bool) C.bool {
+//export snGetSetting
+func snGetSetting(key *C.char, volume *C.double, muted *C.bool) C.bool {
 	settings.mu.Lock()
 	defer settings.mu.Unlock()
 	a, ok := settings.apps[C.GoString(key)]
@@ -107,8 +107,8 @@ func tmGetSetting(key *C.char, volume *C.double, muted *C.bool) C.bool {
 	return true
 }
 
-//export tmSetSetting
-func tmSetSetting(key *C.char, volume C.double, muted C.bool) {
+//export snSetSetting
+func snSetSetting(key *C.char, volume C.double, muted C.bool) {
 	settings.mu.Lock()
 	defer settings.mu.Unlock()
 	k := C.GoString(key)
@@ -120,16 +120,16 @@ func tmSetSetting(key *C.char, volume C.double, muted C.bool) {
 	settings.scheduleSave()
 }
 
-//export tmResetAll
-func tmResetAll() {
+//export snResetAll
+func snResetAll() {
 	settings.mu.Lock()
 	defer settings.mu.Unlock()
 	settings.apps = map[string]AppSetting{}
 	settings.scheduleSave()
 }
 
-//export tmFlush
-func tmFlush() {
+//export snFlush
+func snFlush() {
 	settings.mu.Lock()
 	if settings.timer != nil {
 		settings.timer.Stop()
