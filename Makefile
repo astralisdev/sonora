@@ -5,6 +5,14 @@ export CGO_CFLAGS  := -O2 -mmacosx-version-min=14.2
 export CGO_LDFLAGS := -mmacosx-version-min=14.2
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+# macOS remembers permissions (System Audio Recording) by code signature. An
+# ad-hoc signature changes on every build, so macOS would ask again after each
+# rebuild; signing with a real identity keeps the permission until Sonora is
+# removed. Uses the first Developer ID / Apple Development identity found, or
+# falls back to ad-hoc. Override with `make SIGN_IDENTITY="..."`.
+SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | grep -m1 -oE '"(Developer ID Application|Apple Development): [^"]+"' | tr -d '"')
+SIGN := $(if $(SIGN_IDENTITY),$(SIGN_IDENTITY),-)
+
 .PHONY: app run install test universal zip icon clean
 
 # Builds build/Sonora.app for this Mac's architecture.
@@ -14,7 +22,7 @@ app:
 	go build -ldflags "$(LDFLAGS)" -o $(APP)/Contents/MacOS/Sonora .
 	sed 's/VERSION/$(VERSION)/g' Info.plist > $(APP)/Contents/Info.plist
 	mkdir -p $(APP)/Contents/Resources && cp assets/Sonora.icns $(APP)/Contents/Resources/
-	codesign --force --sign - $(APP)
+	codesign --force --sign "$(SIGN)" $(APP)
 
 test:
 	go vet ./...
@@ -39,7 +47,7 @@ universal:
 	lipo -create -output $(APP)/Contents/MacOS/Sonora build/Sonora-arm64 build/Sonora-amd64
 	sed 's/VERSION/$(VERSION)/g' Info.plist > $(APP)/Contents/Info.plist
 	mkdir -p $(APP)/Contents/Resources && cp assets/Sonora.icns $(APP)/Contents/Resources/
-	codesign --force --sign - $(APP)
+	codesign --force --sign "$(SIGN)" $(APP)
 
 zip: universal
 	cd build && ditto -c -k --keepParent Sonora.app Sonora-$(VERSION).zip

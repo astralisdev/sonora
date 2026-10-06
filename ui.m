@@ -432,17 +432,20 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
     for (SNApp *app in apps) [self addRow:app index:index++];
 
     if (showSystem && system.count) {
-        [_menu addItem:[NSMenuItem sectionHeaderWithTitle:@"System Sounds"]];
+        [_menu addItem:[NSMenuItem sectionHeaderWithTitle:@"Siri, Alerts & Background Audio"]];
         for (SNApp *app in system) [self addRow:app index:index++];
     }
 
     [_menu addItem:NSMenuItem.separatorItem];
-    [self addItem:@"Reset All to 100%" action:@selector(resetAll:) key:@""];
+    NSMenuItem *reset = [self addItem:@"Reset All Levels" action:@selector(resetAll:) key:@""];
+    reset.toolTip = @"Set every app back to 100%, its normal volume.";
 
     NSString *systemTitle = system.count && !showSystem
-        ? [NSString stringWithFormat:@"Show System Sounds (%lu)", (unsigned long)system.count]
-        : @"Show System Sounds";
+        ? [NSString stringWithFormat:@"Show Siri, Alerts & Background Audio (%lu)", (unsigned long)system.count]
+        : @"Show Siri, Alerts & Background Audio";
     NSMenuItem *systemItem = [self addItem:systemTitle action:@selector(toggleSystemSounds:) key:@""];
+    systemItem.toolTip = @"Also list macOS and background processes that make sound, such as Siri, "
+                         @"notification chimes and dictation, so you can set their volume too.";
     systemItem.state = showSystem ? NSControlStateValueOn : NSControlStateValueOff;
 
     NSMenuItem *login = [self addItem:@"Launch at Login" action:@selector(toggleLogin:) key:@""];

@@ -13,7 +13,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
  │ [✆] WhatsApp          ━━━━━━━━━━○ 100% │
  │ [♫] Spotify           Muted            │
  ├───────────────────────────────────────┤
- │ Reset All to 100%                     │
+ │ Reset All Levels                      │
  │ ✓ Launch at Login                     │
  │ Quit Sonora                        ⌘Q │
  └───────────────────────────────────────┘
@@ -26,7 +26,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
 - No audio driver or kernel extension to install, and no virtual device to pick. It works with whatever output you're using, including AirPods, and follows output changes automatically.
 - Apps you leave at 100% are not touched at all.
 - The menu bar title "deciphers" into the app name and level whenever you move a slider, then goes back to the plain icon. Menu rows slide in, and playing apps show bouncing activity bars (green during a call). All animation stops if macOS *Reduce Motion* is on.
-- Background and system processes (notification chimes, Siri, speech…) are kept in a separate **System Sounds** section, hidden by default.
+- Background and system processes (Siri, notification chimes, dictation…) are kept in a separate **Siri, Alerts & Background Audio** section, hidden by default.
 - If Sonora can't capture audio (System Audio Recording denied), it stops tapping so no app is ever left silent, and the menu shows how to fix it.
 
 ## Requirements
@@ -51,6 +51,8 @@ make install      # builds Sonora.app, copies it to /Applications and launches i
 ```
 
 Other targets: `make app` (build only, into `build/`), `make run`, `make test`, `make universal` (arm64 + x86_64), `make zip`.
+
+`make` signs the app with your first *Developer ID* or *Apple Development* certificate if you have one, so macOS remembers the permission below across rebuilds; with no certificate it falls back to an ad-hoc signature, and macOS asks again after every rebuild.
 
 The first time you change an app's volume, macOS asks for permission to capture **system audio**. Allow it (System Settings → Privacy & Security → Screen & System Audio Recording → *System Audio Recording Only*). Sonora needs it to read the app's audio and play it back at the new level. Nothing is recorded or sent anywhere.
 
