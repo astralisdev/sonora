@@ -25,8 +25,14 @@ NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeD
 static const NSTimeInterval kTapGracePeriod = 30.0;
 
 // How long a tap is kept after its volume returns to 100%, so dragging a
-// slider across 100% doesn't tear the tap down and rebuild it.
-static const NSTimeInterval kUnityHold = 15.0;
+// slider across 100% doesn't tear the tap down and rebuild it. Kept short
+// because a tapped app is heard slightly late (see kIOBufferFrames).
+static const NSTimeInterval kUnityHold = 3.0;
+
+// IO buffer of each tap's aggregate device. The tap path adds a fixed delay
+// (about 40 ms with the tap's own buffering) plus a few IO buffers; 128 frames
+// instead of the default 512 takes ~16 ms off at 48 kHz for little CPU.
+static const UInt32 kIOBufferFrames = 128;
 
 #pragma mark - Core Audio helpers
 
@@ -245,6 +251,17 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         NSLog(@"sonora: creating aggregate device for %@ failed (%d)", key, (int)err);
         [self teardown];
         return nil;
+    }
+
+    UInt32 frames = kIOBufferFrames;
+    AudioObjectPropertyAddress fsa = addr(kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal);
+    AudioObjectSetPropertyData(_aggID, &fsa, 0, NULL, sizeof(frames), &frames); // best effort; default otherwise
+    if (gDiag) {
+        NSString *name = [key copy];
+        AudioObjectPropertyAddress oa = addr(kAudioDeviceProcessorOverload, kAudioObjectPropertyScopeGlobal);
+        AudioObjectAddPropertyListenerBlock(_aggID, &oa, dispatch_get_main_queue(), ^(UInt32 n, const AudioObjectPropertyAddress *x) {
+            NSLog(@"sonora[debug] %@: audio overload (dropout)", name);
+        });
     }
 
     AudioObjectPropertyAddress ra = addr(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal);

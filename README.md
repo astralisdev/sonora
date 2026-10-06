@@ -80,6 +80,7 @@ The UI and audio layers are Objective-C called through cgo, since AppKit and the
 ## Known limitations
 
 - **Call apps (WhatsApp, FaceTime, Zoom…)** work, with one twist. macOS raises call audio by a fixed amount (about +20 dB) *after* the point where taps read it. So for an app that is using voice processing, Sonora adds that boost back before applying your volume. Calls are detected from the echo canceller's signature: the app reads its own output device back as an input. The boost was measured on AirPods. If a call sounds too loud or too quiet at 100% on your setup, run `Sonora -calibrate <bundle id>` during a call, pick the step that sounds like "direct", and put that number in `settings.json` as `"callBoostDB"`.
+- **Latency:** an app that is not at 100% is heard about 60 ms late. Most of that delay comes from macOS's tap and aggregate-device path, and Sonora keeps its own part small (128-frame buffers, 1.3 ms limiter). You can notice it as a slight lip-sync offset on video calls. At 100%, Sonora steps out of the way within 3 s and there is no added delay.
 - Creating or removing a tap can cause a very short glitch in other audio.
 - Boosting is limited to +6 dB (150%).
 - Output follows the system default device. Routing apps to different devices isn't supported (yet).
