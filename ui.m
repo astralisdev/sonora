@@ -1,7 +1,6 @@
 // ui.m — the menu bar item and its per-app volume sliders.
 
 #import <AppKit/AppKit.h>
-#import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import "engine.h"
@@ -434,17 +433,12 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 
     if (engine.callActive) {
         // macOS's own mic filter (Voice Isolation) removes music and noise far
-        // better than a call app's echo canceller; it's chosen per app in
-        // Control Center, so the best Sonora can do is open that picker.
+        // better than a call app's echo canceller. It's chosen per app in
+        // Control Center and no API lets another app open it, so Sonora explains
+        // where it is.
         [_menu addItem:NSMenuItem.separatorItem];
-        NSMenuItem *mic = [self addItem:@"Microphone Mode…" action:@selector(showMicModes:) key:@""];
+        NSMenuItem *mic = [self addItem:@"Filter Music Out of Your Mic…" action:@selector(explainVoiceIsolation:) key:@""];
         mic.image = [NSImage imageWithSystemSymbolName:@"mic.fill" accessibilityDescription:nil];
-        mic.toolTip = @"Choose Voice Isolation so the other person hears only your voice, "
-                      @"not music or noise from the room.";
-        NSMenuItem *hint = [[NSMenuItem alloc] initWithTitle:@"Pick Voice Isolation to filter out music" action:nil keyEquivalent:@""];
-        hint.enabled = NO;
-        hint.indentationLevel = 1;
-        [_menu addItem:hint];
     }
 
     [_menu addItem:NSMenuItem.separatorItem];
@@ -494,8 +488,21 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 
 - (void)resetAll:(id)sender { [[SNEngine shared] resetAll]; }
 
-- (void)showMicModes:(id)sender {
-    [AVCaptureDevice showSystemUserInterface:AVCaptureSystemUserInterfaceMicrophoneModes];
+- (void)explainVoiceIsolation:(id)sender {
+    NSString *callApp = @"your call app";
+    for (SNApp *app in [SNEngine shared].apps) if (app.inCall) callApp = app.name;
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Turn on Voice Isolation";
+    alert.informativeText = [NSString stringWithFormat:
+        @"Voice Isolation makes the other person hear only your voice, not music or noise in the room.\n\n"
+        @"1. Click Control Center in the menu bar (the icon with two switches).\n"
+        @"2. Click Mic Mode at the top. It only appears during a call.\n"
+        @"3. Choose Voice Isolation.\n\n"
+        @"macOS remembers this for %@, so you only need to do it once.", callApp];
+    alert.icon = [NSImage imageWithSystemSymbolName:@"mic.fill" accessibilityDescription:nil];
+    [alert addButtonWithTitle:@"OK"];
+    [NSApp activateIgnoringOtherApps:YES];
+    [alert runModal];
 }
 
 - (void)setCallDuck:(NSMenuItem *)sender {
