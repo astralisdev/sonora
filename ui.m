@@ -35,7 +35,8 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
     _iconButton.accessibilityLabel = [NSString stringWithFormat:@"Mute %@", app.name ?: app.key];
     [self addSubview:_iconButton];
 
-    _name = [NSTextField labelWithString:app.name ?: app.key];
+    NSString *title = app.name ?: app.key;
+    _name = [NSTextField labelWithString:_inCall ? [title stringByAppendingString:@"  ·  in call"] : title];
     _name.frame = NSMakeRect(50, 22, 180, 15);
     _name.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
     _name.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -60,17 +61,6 @@ static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
 }
 
 - (void)updateLabels {
-    if (_inCall) {
-        // A tap sees call audio far below its final level, so it can't be scaled
-        // accurately. Leave it to the system volume.
-        _slider.doubleValue = 100;
-        _slider.enabled = NO;
-        _iconButton.enabled = NO;
-        _iconButton.toolTip = @"This app is in a call. Use the system volume for it, and lower the other apps here.";
-        _percent.stringValue = @"In call";
-        _percent.textColor = NSColor.secondaryLabelColor;
-        return;
-    }
     _percent.stringValue = _muted ? @"Muted" : [NSString stringWithFormat:@"%d%%", (int)lround(_slider.doubleValue)];
     _percent.textColor = _muted ? NSColor.secondaryLabelColor : NSColor.labelColor;
     _iconButton.alphaValue = _muted ? 0.35 : 1.0;

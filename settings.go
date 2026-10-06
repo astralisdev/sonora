@@ -20,11 +20,22 @@ type AppSetting struct {
 	Muted  bool    `json:"muted,omitempty"`
 }
 
+// defaultCallBoostDB is how much macOS raises call audio after the point where
+// taps read it, measured with -calibrate on AirPods.
+const defaultCallBoostDB = 20
+
 type store struct {
 	mu    sync.Mutex
 	path  string
 	apps  map[string]AppSetting
+	boost *float64 // callBoostDB override from settings.json
 	timer *time.Timer
+}
+
+// settingsFile is the on-disk layout of settings.json.
+type settingsFile struct {
+	Apps        map[string]AppSetting `json:"apps"`
+	CallBoostDB *float64              `json:"callBoostDB,omitempty"`
 }
 
 var settings = &store{apps: map[string]AppSetting{}}
@@ -50,9 +61,7 @@ func (s *store) load() error {
 	if err != nil {
 		return err
 	}
-	var file struct {
-		Apps map[string]AppSetting `json:"apps"`
-	}
+	var file settingsFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		return err
 	}
@@ -64,6 +73,10 @@ func (s *store) load() error {
 		}
 		a.Volume = math.Max(0, math.Min(a.Volume, 150))
 		s.apps[k] = a
+	}
+	if b := file.CallBoostDB; b != nil && !math.IsNaN(*b) {
+		v := math.Max(0, math.Min(*b, 30))
+		s.boost = &v
 	}
 	return nil
 }
@@ -82,9 +95,7 @@ func (s *store) scheduleSave() {
 
 func (s *store) save() {
 	s.mu.Lock()
-	data, err := json.MarshalIndent(struct {
-		Apps map[string]AppSetting `json:"apps"`
-	}{s.apps}, "", "  ")
+	data, err := json.MarshalIndent(settingsFile{Apps: s.apps, CallBoostDB: s.boost}, "", "  ")
 	path := s.path
 	s.mu.Unlock()
 	if err != nil {
@@ -141,4 +152,14 @@ func snFlush() {
 	}
 	settings.mu.Unlock()
 	settings.save()
+}
+
+//export snCallBoostDB
+func snCallBoostDB() C.double {
+	settings.mu.Lock()
+	defer settings.mu.Unlock()
+	if settings.boost != nil {
+		return C.double(*settings.boost)
+	}
+	return defaultCallBoostDB
 }

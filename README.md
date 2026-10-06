@@ -79,7 +79,7 @@ The UI and audio layers are Objective-C called through cgo, since AppKit and the
 
 ## Known limitations
 
-- **Call apps (WhatsApp, FaceTime, Zoom…) can't be scaled.** While an app is using the microphone and speaker together, macOS processes its audio so that it reaches a tap far below its final level, and replaying it would sound much quieter than normal. Sonora detects this, shows the app as **In call** and leaves it alone. The intended use is to lower *everything else* (YouTube, music) while the call stays at the system volume.
+- **Call apps (WhatsApp, FaceTime, Zoom…)** work, with one twist. macOS raises call audio by a fixed amount (about +20 dB) *after* the point where taps read it. So for an app that is using voice processing, Sonora adds that boost back before applying your volume. Calls are detected from the echo canceller's signature: the app reads its own output device back as an input. The boost was measured on AirPods. If a call sounds too loud or too quiet at 100% on your setup, run `Sonora -calibrate <bundle id>` during a call, pick the step that sounds like "direct", and put that number in `settings.json` as `"callBoostDB"`.
 - Creating or removing a tap can cause a very short glitch in other audio.
 - Boosting is limited to +6 dB (150%).
 - Output follows the system default device. Routing apps to different devices isn't supported (yet).
@@ -94,6 +94,7 @@ Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceili
 
 ```sh
 ./build/Sonora.app/Contents/MacOS/Sonora -list          # audio apps; PLAYING / CALL / idle
+./build/Sonora.app/Contents/MacOS/Sonora -calibrate net.whatsapp.WhatsApp   # tune callBoostDB during a call
 SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains and measured levels
 ```
 

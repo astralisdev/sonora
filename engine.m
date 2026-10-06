@@ -63,6 +63,30 @@ static NSArray<NSNumber *> *readObjectList(AudioObjectID obj, AudioObjectPropert
     return out;
 }
 
+static NSArray<NSNumber *> *readScopedObjectList(AudioObjectID obj, AudioObjectPropertySelector sel,
+                                                  AudioObjectPropertyScope scope) {
+    AudioObjectPropertyAddress a = addr(sel, scope);
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(obj, &a, 0, NULL, &size) != noErr || size == 0) return @[];
+    NSMutableData *data = [NSMutableData dataWithLength:size];
+    if (AudioObjectGetPropertyData(obj, &a, 0, NULL, &size, data.mutableBytes) != noErr) return @[];
+    NSMutableArray *out = [NSMutableArray new];
+    const AudioObjectID *ids = data.bytes;
+    for (UInt32 i = 0; i < size / sizeof(AudioObjectID); i++) [out addObject:@(ids[i])];
+    return out;
+}
+
+// True when the process runs Apple's voice processing (what call apps use).
+// Its echo canceller reads back the output device as an input, so the same
+// device shows up in both the process's input and output device lists.
+static BOOL usesVoiceProcessing(AudioObjectID process) {
+    NSArray *inputs = readScopedObjectList(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeInput);
+    if (inputs.count == 0) return NO;
+    NSArray *outputs = readScopedObjectList(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeOutput);
+    for (NSNumber *d in outputs) if ([inputs containsObject:d]) return YES;
+    return NO;
+}
+
 static AudioObjectID defaultOutputDevice(void) {
     return readU32(kAudioObjectSystemObject, kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectUnknown);
 }
@@ -397,6 +421,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         NSString *bundleID = readString(pobj, kAudioProcessPropertyBundleID);
         BOOL playing = readU32(pobj, kAudioProcessPropertyIsRunningOutput, 0) != 0;
         BOOL listening = readU32(pobj, kAudioProcessPropertyIsRunningInput, 0) != 0;
+        BOOL call = playing && listening && usesVoiceProcessing(pobj);
 
         NSRunningApplication *ra = [NSRunningApplication runningApplicationWithProcessIdentifier:responsiblePID(pid)];
         if (!ra.bundleIdentifier) ra = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
@@ -422,7 +447,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         }
         app.processObjects = [app.processObjects arrayByAddingObject:obj];
         app.playing = app.playing || playing;
-        app.inCall = app.inCall || (playing && listening);
+        app.inCall = app.inCall || call;
     }
     return ordered;
 }
@@ -476,12 +501,16 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSDate *now = [NSDate date];
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
     for (SNApp *app in _apps) {
-        if (app.inCall) continue; // call audio reaches a tap far below its final level; leave it alone
         float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]);
         if (gain != 1.f) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
-        if (gain != 1.f || holding) wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
+        if (gain == 1.f && !holding) continue;
+        // macOS raises call audio by a fixed amount *after* the point where taps
+        // read it (about +20 dB, measured), so a replayed call needs that boost
+        // back to sound the same as the original.
+        if (app.inCall) gain *= (float)pow(10.0, snCallBoostDB() / 20.0);
+        wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
     [self reconcile:wanted outputUID:_outputUID];
 }
@@ -557,5 +586,41 @@ void SNListProcesses(void) {
                    app.name.UTF8String, (unsigned long)app.processObjects.count,
                    app.processObjects.count == 1 ? "" : "es");
         }
+    }
+}
+
+#pragma mark - Calibration
+
+// Debug: alternates an app's direct audio with Sonora's replay at several
+// compensation gains (spoken labels), to find the gain that matches direct.
+void SNCalibrate(const char *bundleID) {
+    @autoreleasepool {
+        SNApp *target = nil;
+        for (SNApp *app in [SNEngine scanApps]) if ([app.key isEqualToString:@(bundleID)]) target = app;
+        if (!target) { printf("no audio process for %s\n", bundleID); return; }
+        NSString *uid = readString(defaultOutputDevice(), kAudioDevicePropertyDeviceUID);
+        struct { const char *label; double dB; } steps[] = {
+            {"direct", -1}, {"plus ten", 10}, {"direct", -1}, {"plus twenty", 20},
+            {"direct", -1}, {"plus fifteen", 15}, {"direct", -1}, {"plus twenty five", 25},
+        };
+        printf("The step that sounds like \"direct\" is your callBoostDB (settings.json, default 20).\n");
+        int count = sizeof(steps) / sizeof(steps[0]);
+        printf("Calibrating %s. Compare each step with the \"direct\" before it. 6 s per step.\n", target.name.UTF8String);
+        for (int i = 0; i < count; i++) {
+            printf("[%d/%d] %s\n", i + 1, count, steps[i].label);
+            fflush(stdout);
+            [NSTask launchedTaskWithExecutableURL:[NSURL fileURLWithPath:@"/usr/bin/say"]
+                arguments:@[ @"-v", @"Samantha", @(steps[i].label) ] error:nil terminationHandler:nil];
+            [NSThread sleepForTimeInterval:1.5];
+            SNTap *tap = nil;
+            if (steps[i].dB >= 0) {
+                tap = [[SNTap alloc] initWithKey:target.key processes:target.processObjects outputUID:uid
+                                            gain:(float)pow(10, steps[i].dB / 20)];
+                if (!tap) { printf("tap failed\n"); return; }
+            }
+            [NSThread sleepForTimeInterval:4.5];
+            tap = nil;
+        }
+        printf("done\n");
     }
 }
