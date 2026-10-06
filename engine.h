@@ -7,8 +7,9 @@ extern NSNotificationName const SNEngineAppsDidChangeNotification;
 extern NSNotificationName const SNEngineVolumeDidChangeNotification;
 // Posted when permissionProblem changes.
 extern NSNotificationName const SNEnginePermissionDidChangeNotification;
-// Posted when an app starts a call. userInfo: key, name.
+// Posted when an app starts or ends a call. userInfo: key, name.
 extern NSNotificationName const SNEngineCallDidStartNotification;
+extern NSNotificationName const SNEngineCallDidEndNotification;
 
 // One user-facing app, possibly made of several audio processes (e.g. a browser
 // and its helper processes all count as the browser).
@@ -18,8 +19,15 @@ extern NSNotificationName const SNEngineCallDidStartNotification;
 @property(nonatomic, strong) NSImage *icon;
 @property(nonatomic, copy) NSArray<NSNumber *> *processObjects; // AudioObjectIDs
 @property(nonatomic) BOOL playing;             // any process is producing output
-@property(nonatomic) BOOL inCall;              // running Apple voice processing (a call)
+@property(nonatomic) BOOL listening;           // some process is using the microphone
+@property(nonatomic) BOOL voiceProcessing;     // some process runs Apple voice processing
+@property(nonatomic) BOOL callBoost;           // ...on a listed device, so taps hear it ~20 dB low
+@property(nonatomic) BOOL inCall;              // in a call (see SNEngine refresh)
 @property(nonatomic) BOOL isSystem;            // background/system process rather than a regular app
+// Where this app's volume is stored. Calls have their own volume
+// ("<bundle id>@call"), so turning a call up doesn't make the app's
+// notifications and videos loud once the call is over.
+@property(nonatomic, readonly) NSString *settingsKey;
 @end
 
 // System Audio Recording permission as macOS reports it.

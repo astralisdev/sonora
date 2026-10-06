@@ -132,9 +132,9 @@ static void animateIn(NSView *view, NSUInteger index) {
 - (instancetype)initWithApp:(SNApp *)app {
     if (!(self = [super initWithFrame:NSMakeRect(0, 0, kRowWidth, kRowHeight)])) return nil;
     self.wantsLayer = YES;
-    _key = app.key;
+    _key = app.settingsKey;
     SNEngine *engine = [SNEngine shared];
-    _muted = [engine mutedForKey:app.key];
+    _muted = [engine mutedForKey:_key];
     NSString *title = app.name ?: app.key;
 
     _iconButton = [NSButton buttonWithImage:app.icon target:self action:@selector(toggleMute:)];
@@ -160,7 +160,7 @@ static void animateIn(NSView *view, NSUInteger index) {
     [_activity setPlaying:app.playing call:app.inCall];
     [self addSubview:_activity];
 
-    _slider = [NSSlider sliderWithValue:[engine volumeForKey:app.key] minValue:0 maxValue:kMaxVolume
+    _slider = [NSSlider sliderWithValue:[engine volumeForKey:_key] minValue:0 maxValue:kMaxVolume
                                  target:self action:@selector(sliderMoved:)];
     _slider.frame = NSMakeRect(48, 3, 196, 20);
     _slider.controlSize = NSControlSizeSmall;
@@ -282,6 +282,7 @@ static void animateIn(NSView *view, NSUInteger index) {
     [nc addObserver:self selector:@selector(volumeChanged:) name:SNEngineVolumeDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(permissionChanged:) name:SNEnginePermissionDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(callStarted:) name:SNEngineCallDidStartNotification object:nil];
+    [nc addObserver:self selector:@selector(callEnded:) name:SNEngineCallDidEndNotification object:nil];
     [[SNEngine shared] start];
     [self announce:@"SONORA"];
     if (SNWelcomeController.needsWelcome) [self showWelcome:nil];
@@ -334,6 +335,11 @@ static void animateIn(NSView *view, NSUInteger index) {
 - (void)callStarted:(NSNotification *)note {
     [self announce:@"CALL MODE"];
     [self showCallTipFor:note.userInfo[@"key"] name:note.userInfo[@"name"]];
+}
+
+- (void)callEnded:(NSNotification *)note {
+    [_callTip close];
+    [self announce:@"CALL ENDED"];
 }
 
 #pragma mark - Call tip
@@ -406,7 +412,7 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
 - (void)volumeChanged:(NSNotification *)note {
     NSString *key = note.userInfo[@"key"];
     NSString *name = key;
-    for (SNApp *app in [SNEngine shared].apps) if ([app.key isEqualToString:key]) name = app.name;
+    for (SNApp *app in [SNEngine shared].apps) if ([app.settingsKey isEqualToString:key]) name = app.name;
     name = name.uppercaseString;
     if (name.length > 12) name = [[name substringToIndex:11] stringByAppendingString:@"…"];
     BOOL muted = [note.userInfo[@"muted"] boolValue];

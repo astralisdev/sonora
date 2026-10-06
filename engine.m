@@ -9,6 +9,7 @@
 // Apps at 100% are left untouched, so Sonora adds no latency to them.
 
 #import "engine.h"
+#import <QuartzCore/QuartzCore.h>
 #import <CoreAudio/AudioHardwareTapping.h>
 #import <CoreAudio/CATapDescription.h>
 #include <dlfcn.h>
@@ -26,6 +27,7 @@ NSNotificationName const SNEngineAppsDidChangeNotification = @"SNEngineAppsDidCh
 NSNotificationName const SNEngineVolumeDidChangeNotification = @"SNEngineVolumeDidChange";
 NSNotificationName const SNEnginePermissionDidChangeNotification = @"SNEnginePermissionDidChange";
 NSNotificationName const SNEngineCallDidStartNotification = @"SNEngineCallDidStart";
+NSNotificationName const SNEngineCallDidEndNotification = @"SNEngineCallDidEnd";
 
 // How long a tap is kept after its app goes quiet, so pausing and resuming a
 // video doesn't rebuild the tap (and briefly play at full volume) every time.
@@ -89,15 +91,37 @@ static NSArray<NSNumber *> *readScopedObjectList(AudioObjectID obj, AudioObjectP
     return out;
 }
 
-// True when the process runs Apple's voice processing (what call apps use).
-// Its echo canceller reads back the output device as an input, so the same
-// device shows up in both the process's input and output device lists.
-static BOOL usesVoiceProcessing(AudioObjectID process) {
+static BOOL hasOutputStreams(AudioObjectID device) {
+    AudioObjectPropertyAddress a = addr(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput);
+    UInt32 size = 0;
+    return AudioObjectGetPropertyDataSize(device, &a, 0, NULL, &size) == noErr && size > 0;
+}
+
+// How a process is running Apple's voice processing (what call apps use), as
+// seen from its device lists. It matters for the volume: see callBoostDB.
+typedef NS_ENUM(int, SNVoiceProcessing) {
+    SNVoiceProcessingNone,
+    // The echo canceller reads back a speaker device as an input, so a device
+    // with output streams is among the process's *input* devices. In this mode
+    // macOS raises the call audio after the point where taps read it.
+    SNVoiceProcessingListed,
+    // Later in a call the processing can move to a private device that macOS
+    // doesn't list: the process records and plays but reports no devices at
+    // all. Taps then get the call at its final level. (Apps that only read
+    // taps, like Sonora, still list the output device they play to.)
+    SNVoiceProcessingPrivate,
+};
+
+static SNVoiceProcessing voiceProcessing(AudioObjectID process) {
     NSArray *inputs = readScopedObjectList(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeInput);
-    if (inputs.count == 0) return NO;
-    NSArray *outputs = readScopedObjectList(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeOutput);
-    for (NSNumber *d in outputs) if ([inputs containsObject:d]) return YES;
-    return NO;
+    if (inputs.count == 0) {
+        BOOL noOutputs = readScopedObjectList(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeOutput).count == 0;
+        return noOutputs ? SNVoiceProcessingPrivate : SNVoiceProcessingNone;
+    }
+    for (NSNumber *d in inputs) {
+        if (d.unsignedIntValue != kAudioObjectUnknown && hasOutputStreams(d.unsignedIntValue)) return SNVoiceProcessingListed;
+    }
+    return SNVoiceProcessingNone;
 }
 
 static AudioObjectID defaultOutputDevice(void) {
@@ -224,6 +248,9 @@ static NSString *appForDaemon(NSString *bundleID) {
 #pragma mark - Model
 
 @implementation SNApp
+- (NSString *)settingsKey {
+    return self.inCall ? [self.key stringByAppendingString:@"@call"] : self.key;
+}
 @end
 
 #pragma mark - Real-time render
@@ -478,8 +505,13 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     BOOL _refreshPending;
     BOOL _permissionProblem;
     BOOL _callWasActive;
-    float _duck;          // current extra gain for non-call apps while a call is active (1 = none)
-    NSTimer *_duckTimer;  // fades _duck towards its target
+    NSDictionary *_caller;  // key/name of the app in the current call
+    NSMutableSet<NSString *> *_callLatch; // apps in a call (main thread only)
+    float _duck;            // current extra gain for non-call apps while a call is active (1 = none)
+    double _duckDB;         // the same, in dB of reduction (0 = none), which is what fades
+    double _fadeFrom, _fadeTo;            // dB of the fade in progress
+    CFTimeInterval _fadeStart, _fadeLength;
+    NSTimer *_duckTimer;    // fades _duckDB towards its target
 }
 
 + (instancetype)shared {
@@ -498,6 +530,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     _observedProcesses = [NSMutableSet new];
     _apps = @[];
     _duck = 1;
+    _callLatch = [NSMutableSet new];
     return self;
 }
 
@@ -641,7 +674,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         NSString *bundleID = readString(pobj, kAudioProcessPropertyBundleID);
         BOOL playing = readU32(pobj, kAudioProcessPropertyIsRunningOutput, 0) != 0;
         BOOL listening = readU32(pobj, kAudioProcessPropertyIsRunningInput, 0) != 0;
-        BOOL call = playing && listening && usesVoiceProcessing(pobj);
+        SNVoiceProcessing vp = listening ? voiceProcessing(pobj) : SNVoiceProcessingNone;
 
         NSRunningApplication *ra = [NSRunningApplication runningApplicationWithProcessIdentifier:responsiblePID(pid)];
         if (!ra.bundleIdentifier) ra = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
@@ -667,27 +700,50 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         }
         app.processObjects = [app.processObjects arrayByAddingObject:obj];
         app.playing = app.playing || playing;
-        app.inCall = app.inCall || call;
+        // A call may run voice processing in one process and play in another,
+        // so it's judged across the whole app (resolved after the loop).
+        app.voiceProcessing = app.voiceProcessing || vp != SNVoiceProcessingNone;
+        app.callBoost = app.callBoost || vp == SNVoiceProcessingListed;
+        app.listening = app.listening || listening;
     }
+    for (SNApp *app in ordered) app.inCall = app.playing && app.voiceProcessing;
     return ordered;
 }
 
 - (void)refresh {
     NSArray<SNApp *> *scanned = [SNEngine scanApps];
 
-    // Watch each process's "is running output" flag so play/pause is noticed immediately.
+    // Watch each process so play/pause and calls starting/ending are noticed immediately.
     __weak SNEngine *weakSelf = self;
     NSMutableSet *current = [NSMutableSet new];
     for (SNApp *app in scanned) {
         for (NSNumber *obj in app.processObjects) {
             [current addObject:obj];
             if ([_observedProcesses containsObject:obj]) continue;
-            AudioObjectPropertyAddress a = addr(kAudioProcessPropertyIsRunningOutput, kAudioObjectPropertyScopeGlobal);
-            AudioObjectAddPropertyListenerBlock(obj.unsignedIntValue, &a, dispatch_get_main_queue(),
-                ^(UInt32 n, const AudioObjectPropertyAddress *x) { [weakSelf setNeedsRefresh]; });
+            // Output start/stop is play/pause; input and device changes are a call
+            // starting or ending, which must be noticed at once (see callBoostDB).
+            AudioObjectPropertySelector watched[] = {
+                kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyIsRunningInput, kAudioProcessPropertyDevices,
+            };
+            for (int i = 0; i < 3; i++) {
+                AudioObjectPropertyAddress a = addr(watched[i], kAudioObjectPropertyScopeGlobal);
+                AudioObjectAddPropertyListenerBlock(obj.unsignedIntValue, &a, dispatch_get_main_queue(),
+                    ^(UInt32 n, const AudioObjectPropertyAddress *x) { [weakSelf setNeedsRefresh]; });
+            }
         }
     }
     [_observedProcesses setSet:current]; // dead process objects take their listeners with them
+
+    // A call is recognised by its voice-processing signature, but that can
+    // disappear mid-call (see SNVoiceProcessingPrivate), so once seen it holds for as
+    // long as the app keeps the microphone running, and ends the moment it stops.
+    for (SNApp *app in scanned) {
+        if (app.voiceProcessing && app.playing) [_callLatch addObject:app.key];
+        if (!app.listening) [_callLatch removeObject:app.key];
+        app.inCall = [_callLatch containsObject:app.key];
+    }
+    NSSet *present = [NSSet setWithArray:[scanned valueForKey:@"key"]];
+    for (NSString *key in _callLatch.allObjects) if (![present containsObject:key]) [_callLatch removeObject:key];
 
     NSDate *now = [NSDate date];
     NSMutableArray<SNApp *> *visible = [NSMutableArray new];
@@ -715,8 +771,13 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     SNApp *caller = nil;
     for (SNApp *app in visible) if (app.inCall) caller = app;
     if (caller && !_callWasActive) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineCallDidStartNotification object:self
-            userInfo:@{@"key" : caller.key, @"name" : caller.name ?: caller.key}];
+        _caller = @{@"key" : caller.key, @"name" : caller.name ?: caller.key};
+        if (gDiag) NSLog(@"sonora[debug] call started: %@", caller.key);
+        [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineCallDidStartNotification object:self userInfo:_caller];
+    } else if (!caller && _callWasActive) {
+        if (gDiag) NSLog(@"sonora[debug] call ended: %@", _caller[@"key"]);
+        [[NSNotificationCenter defaultCenter] postNotificationName:SNEngineCallDidEndNotification object:self userInfo:_caller];
+        _caller = nil;
     }
     _callWasActive = caller != nil;
     [self updateDuck];
@@ -731,16 +792,17 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     NSDate *now = [NSDate date];
     NSMutableDictionary<NSString *, NSDictionary *> *wanted = [NSMutableDictionary new];
     for (SNApp *app in _permissionProblem ? @[] : _apps) {
-        float gain = sn_gain_for_percent([self volumeForKey:app.key], [self mutedForKey:app.key]);
+        float gain = sn_gain_for_percent([self volumeForKey:app.settingsKey], [self mutedForKey:app.settingsKey]);
         if (!app.inCall) gain *= _duck; // lowered while a call is going on
         if (gain != 1.f) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
         if (gain == 1.f && !holding) continue;
-        // macOS raises call audio by a fixed amount *after* the point where taps
-        // read it (about +20 dB, measured), so a replayed call needs that boost
-        // back to sound the same as the original.
-        if (app.inCall) gain *= (float)pow(10.0, snCallBoostDB() / 20.0);
+        // While a call's voice processing is on a listed device, macOS raises the
+        // call audio by a fixed amount *after* the point where taps read it (about
+        // +20 dB, measured), so the replay needs that boost back to sound the
+        // same. On the private device the tap already gets the final level.
+        if (app.inCall && app.callBoost) gain *= (float)pow(10.0, snCallBoostDB() / 20.0);
         wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
     }
     [self reconcile:wanted outputUID:_outputUID];
@@ -791,29 +853,44 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     [self updateDuck];
 }
 
-// Fades other apps down when a call starts and back up when it ends, rather
-// than jumping, so the change isn't jarring.
-- (void)updateDuck {
+// How far other apps should be lowered right now, in dB (0 = not at all).
+// "Mute" fades to -60 dB and then to silence.
+- (double)duckTargetDB {
     double dB = snCallDuckDB();
-    float target = 1;
-    if (self.callActive && dB > 0) target = dB >= 100 ? 0 : (float)pow(10.0, -dB / 20.0);
-    if (fabsf(target - _duck) < 1e-4) return;
-    if (_duckTimer) return; // already fading; the timer reads the latest target each tick
+    if (!self.callActive || dB <= 0) return 0;
+    return dB >= 100 ? 60 : dB;
+}
+
+// Fades other apps down when a call starts and back up after it ends. The
+// fade is in dB with an ease-in-out curve, so it sounds even and never jumps.
+// Going down is quick (0.8 s) so the call is clear at once; coming back waits
+// out the hang-up tone (1.5 s) and then rises slowly (4 s).
+- (void)updateDuck {
+    double target = self.duckTargetDB;
+    if (fabs(target - _fadeTo) < 0.01 && (_duckTimer || fabs(target - _duckDB) < 0.01)) return;
+
+    BOOL down = target > _duckDB;
+    _fadeFrom = _duckDB;
+    _fadeTo = target;
+    _fadeStart = CACurrentMediaTime() + (down ? 0 : 1.5);
+    _fadeLength = down ? 0.8 : 4.0;
+    if (_duckTimer) return; // the running timer picks up the new fade
+
     __weak SNEngine *weakSelf = self;
     _duckTimer = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *t) {
         SNEngine *e = weakSelf;
         if (!e) { [t invalidate]; return; }
-        double db = snCallDuckDB();
-        float goal = 1;
-        if (e.callActive && db > 0) goal = db >= 100 ? 0 : (float)pow(10.0, -db / 20.0);
-        float step = 1.0f / 30 / 0.8f; // full swing in 0.8 s
-        if (fabsf(goal - e->_duck) <= step) {
-            e->_duck = goal;
+        double p = (CACurrentMediaTime() - e->_fadeStart) / e->_fadeLength;
+        if (p < 0) return; // still waiting to start
+        p = fmin(p, 1);
+        double eased = p * p * (3 - 2 * p); // smoothstep
+        e->_duckDB = e->_fadeFrom + (e->_fadeTo - e->_fadeFrom) * eased;
+        if (p >= 1) {
             [t invalidate];
             e->_duckTimer = nil;
-        } else {
-            e->_duck += goal > e->_duck ? step : -step;
         }
+        BOOL mute = snCallDuckDB() >= 100 && e->_duckDB >= 59.99;
+        e->_duck = mute ? 0 : (float)pow(10.0, -e->_duckDB / 20.0);
         [e apply];
     }];
     [NSRunLoop.mainRunLoop addTimer:_duckTimer forMode:NSRunLoopCommonModes];
