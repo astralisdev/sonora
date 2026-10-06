@@ -520,11 +520,11 @@ static NSString *controlCenterString(NSString *key, NSString *fallback) {
     alert.messageText = [NSString stringWithFormat:@"Turn on “%@”", isolation];
     alert.informativeText = [NSString stringWithFormat:
         @"It makes the other person hear only your voice, not music or noise in the room.\n\n"
-        @"1. While the call is on, click the camera/microphone icon that appears in the menu bar (“%@”). "
-        @"If you don't see it, open Control Center.\n"
-        @"2. Click “%@”.\n"
+        @"1. While the call is on, click the green camera icon in the menu bar (“%@”). "
+        @"It's not the coloured privacy dot. On a crowded menu bar it can be hidden behind the notch.\n"
+        @"2. At the bottom of that menu, click “%@”.\n"
         @"3. Choose “%@”.\n\n"
-        @"macOS remembers this for %@. If it says the app doesn't support it, use "
+        @"macOS remembers this for %@. If the option isn't there, the app doesn't support it: use "
         @"During Calls → Mute Other Apps in Sonora instead.",
         module, micMode, isolation, callApp];
     alert.icon = [NSImage imageWithSystemSymbolName:@"mic.fill" accessibilityDescription:nil];
