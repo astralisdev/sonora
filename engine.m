@@ -868,11 +868,8 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         double volume = [self volumeForKey:app.settingsKey];
         BOOL level = NO;
         if (app.inCall) {
-            // The call app's own sound is the ceiling: macOS can make call audio
-            // louder after the point where taps read it, so a replayed call can
-            // only match it at best. At 100% the call is left untouched (native
-            // loudness, no delay); lower settings turn it down from there.
-            volume = fmin(volume, 100);
+            // At 100% the call is left untouched (native loudness, no delay);
+            // lower settings turn it down from there.
             level = snEvenOutVoices(); // opt-in: leveling needs the tap
             if (volume >= 100 && ![self mutedForKey:app.settingsKey] && !level) {
                 [_lastNonUnity removeObjectForKey:app.key];
@@ -1034,3 +1031,30 @@ void SNListProcesses(void) {
 }
 
 
+
+#pragma mark - Comparison
+
+// Debug: alternates an app between playing directly and through Sonora at
+// exactly 100%, with spoken labels, so you can hear whether they match.
+void SNCompare(const char *bundleID) {
+    @autoreleasepool {
+        SNApp *target = nil;
+        for (SNApp *app in [SNEngine scanApps]) if ([app.key isEqualToString:@(bundleID)]) target = app;
+        if (!target) { printf("no audio process for %s\n", bundleID); return; }
+        NSString *uid = readString(defaultOutputDevice(), kAudioDevicePropertyDeviceUID);
+        printf("Comparing %s: direct vs through Sonora at 100%%. 8 s per step.\n", target.name.UTF8String);
+        const char *labels[] = {"direct", "Sonora", "direct", "Sonora"};
+        for (int i = 0; i < 4; i++) {
+            printf("[%d/4] %s\n", i + 1, labels[i]);
+            fflush(stdout);
+            [NSTask launchedTaskWithExecutableURL:[NSURL fileURLWithPath:@"/usr/bin/say"]
+                arguments:@[ @"-v", @"Samantha", @(labels[i]) ] error:nil terminationHandler:nil];
+            [NSThread sleepForTimeInterval:1.5];
+            SNTap *tap = nil;
+            if (i % 2) tap = [[SNTap alloc] initWithKey:target.key processes:target.processObjects outputUID:uid gain:1];
+            [NSThread sleepForTimeInterval:6.5];
+            tap = nil;
+        }
+        printf("done\n");
+    }
+}

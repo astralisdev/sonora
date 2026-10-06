@@ -16,7 +16,7 @@ import (
 
 // AppSetting is the persisted volume state of one app, keyed by bundle ID.
 type AppSetting struct {
-	Volume float64 `json:"volume"` // percent, 0–150
+	Volume float64 `json:"volume"` // percent, 0–100 (100 = the app's own level)
 	Muted  bool    `json:"muted,omitempty"`
 }
 
@@ -74,7 +74,7 @@ func (s *store) load() error {
 		if math.IsNaN(a.Volume) {
 			continue
 		}
-		a.Volume = math.Max(0, math.Min(a.Volume, 150))
+		a.Volume = math.Max(0, math.Min(a.Volume, 100)) // 100% = the app's own level
 		s.apps[k] = a
 	}
 	s.even = file.EvenOutVoices

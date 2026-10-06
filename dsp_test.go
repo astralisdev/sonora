@@ -39,11 +39,11 @@ func TestUnityIsTransparent(t *testing.T) {
 	}
 }
 
-// Boosting a loud signal must never exceed the ceiling, and must not reach the
-// hard-clip safety net.
+// Raising a loud signal (voice leveling can) must never exceed the ceiling,
+// and must not reach the hard-clip safety net.
 func TestBoostNeverClips(t *testing.T) {
 	for _, freq := range []float64{50, 440, 1000, 8000} {
-		d := newDSP(gainForPercent(150, false), rate)
+		d := newDSP(2, rate) // +6 dB, as voice leveling can apply
 		l, r := d.process(sine(freq, 0.95, rate))
 		d.close()
 		if p := max(peak(l), peak(r)); p > dspCeiling+1e-4 {
@@ -57,7 +57,7 @@ func TestBoostNeverClips(t *testing.T) {
 // saturation, the old source of crackle, would make the ratio swing widely.
 func TestLimiterDoesNotDistort(t *testing.T) {
 	for _, freq := range []float64{440, 1000, 5000} {
-		gain := gainForPercent(150, false)
+		gain := float32(2) // +6 dB
 		d := newDSP(gain, rate)
 		in := sine(freq, 0.9, rate)
 		l, _ := d.process(in)
@@ -108,8 +108,8 @@ func TestGainCurve(t *testing.T) {
 		muted   bool
 		want    float64
 	}{
-		{0, false, 0}, {50, false, 0.25}, {100, false, 1}, {150, false, 1.9953},
-		{120, false, 1.3183}, {-10, false, 0}, {1000, false, 1.9953}, {80, true, 0},
+		{0, false, 0}, {50, false, 0.25}, {100, false, 1}, {150, false, 1},
+		{-10, false, 0}, {1000, false, 1}, {80, true, 0},
 	}
 	for _, c := range cases {
 		if got := float64(gainForPercent(c.percent, c.muted)); math.Abs(got-c.want) > 1e-3 {

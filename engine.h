@@ -68,7 +68,7 @@ typedef NS_ENUM(int, SNPermission) {
 // 100 = muted. Persisted in settings.json as callDuckDB.
 @property(nonatomic) double callDuckDB;
 
-- (double)volumeForKey:(NSString *)key;   // percent, 0–150
+- (double)volumeForKey:(NSString *)key;   // percent, 0–100 (100 = the app's own level)
 - (BOOL)mutedForKey:(NSString *)key;
 - (void)setVolume:(double)percent muted:(BOOL)muted forKey:(NSString *)key;
 - (void)resetAll;

@@ -61,7 +61,7 @@ void sn_dsp_set_leveling(SNDSP *d, float targetDB);
 void sn_dsp_process(SNDSP *d, const float *srcL, unsigned strideL, const float *srcR, unsigned strideR,
                     unsigned inFrames, unsigned total);
 
-// Slider percent (0–150) → linear gain.
+// Slider percent (0–100, 100 = the app's own level) → linear gain.
 float sn_gain_for_percent(double percent, bool muted);
 
 #endif

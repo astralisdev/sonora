@@ -19,7 +19,7 @@ Turn YouTube down while you're on a WhatsApp call, keep Spotify quiet under a Zo
  └─────────────────────────────────────────┘
 ```
 
-- One slider per app that is playing audio, from 0% to 150% (boost).
+- One slider per app that is playing audio. **100% is the app exactly as it sounds without Sonora**, the full volume your speakers give it, and sliding left turns it down. Sonora never makes an app quieter than you set it, and never stands between an app and the speakers at 100%.
 - Click an app's icon to mute it.
 - Volumes are remembered per app and re-applied whenever it plays again.
 - **During calls**, other apps fade down automatically (by 12 dB by default; a little, a lot, mute, or off), and fade gently back a moment after the call ends. Call apps have a separate **call volume**, so turning a call up doesn't make the app's notifications loud afterwards. The first time each app starts a call, a small tip under the menu bar icon suggests macOS's *Voice Isolation* mic mode and shows how to turn it on. This stops speaker music from leaking into your microphone: call apps' echo cancellers remove speech well but music poorly. During a call the menu also offers **Filter Music Out of Your Mic…**, which explains how to turn on macOS's *Voice Isolation* mic mode (the green camera icon in the menu bar during a call → Mic Mode), the strongest mic filter available. macOS doesn't let one app change another app's mic mode, so Sonora can't switch it for you.
@@ -93,14 +93,13 @@ The UI and audio layers are Objective-C called through cgo, since AppKit and the
 - **When a call is the only thing playing**, Sonora steps aside entirely: the call sounds exactly as it would without Sonora, with no added delay. Sonora steps back in, lowering other apps and leveling voices, as soon as another app actually makes sound. A paused player that keeps its audio stream open doesn't count.
 - **Latency:** an app that is not at 100% is heard about 60 ms late. Most of that delay comes from macOS's tap and aggregate-device path, and Sonora keeps its own part small (128-frame buffers, 1.3 ms limiter). You can notice it as a slight lip-sync offset on video calls. At 100%, Sonora steps out of the way within 3 s and there is no added delay.
 - Creating or removing a tap can cause a very short glitch in other audio.
-- Boosting is limited to +6 dB (150%).
 - Output follows the system default device. Routing apps to different devices isn't supported (yet).
 
 ## Volume curve and limiter
 
-Below 100% the slider is squared (50% ≈ -12 dB, about half as loud to the ear). Above 100% it boosts evenly in dB, up to +6 dB at 150%. 100% is exactly unity and bypasses Sonora entirely.
+100% is the maximum: the app plays untouched, at its native level, with no added delay. Below 100% the slider is squared (50% ≈ -12 dB, about half as loud to the ear), so you can weigh apps against each other.
 
-Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceiling. Instead of reshaping individual samples, which is what makes boosted audio crackle, it lowers the volume smoothly about 1.3 ms *before* a peak arrives, then recovers over about 80 ms. Left and right share one gain, so the stereo image never shifts. Gain changes from the sliders are ramped to avoid clicks.
+Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceiling. Instead of reshaping individual samples, which is what makes raised audio crackle, it lowers the volume smoothly about 1.3 ms *before* a peak arrives, then recovers over about 80 ms. Left and right share one gain, so the stereo image never shifts. Gain changes from the sliders are ramped to avoid clicks.
 
 ## Debugging
 

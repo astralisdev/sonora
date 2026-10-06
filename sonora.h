@@ -14,4 +14,7 @@ void SNSnapshot(const char *path);
 // Debug: renders the welcome window to a PNG.
 void SNSnapshotWelcome(const char *path);
 
+// Debug: alternates an app between direct playback and Sonora at 100%.
+void SNCompare(const char *bundleID);
+
 #endif

@@ -139,14 +139,10 @@ void sn_dsp_process(SNDSP *d, const float *srcL, unsigned strideL, const float *
     d->current = target;
 }
 
-// Below 100% the slider is squared (50% ≈ -12 dB, about half as loud to the
-// ear). Above 100% it boosts in even dB steps up to +6 dB at 150%.
+// 100% is the app's own sound and the maximum: Sonora only turns apps down.
+// Below that the slider is squared (50% ≈ -12 dB, about half as loud to the ear).
 float sn_gain_for_percent(double percent, bool muted) {
     if (muted) return 0;
-    percent = fmax(0, fmin(percent, 150));
-    if (percent <= 100) {
-        double x = percent / 100.0;
-        return (float)(x * x);
-    }
-    return (float)pow(10.0, (percent - 100.0) / 50.0 * 6.0 / 20.0);
+    double x = fmax(0, fmin(percent, 100)) / 100.0;
+    return (float)(x * x);
 }

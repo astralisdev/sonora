@@ -7,7 +7,7 @@
 #import "welcome.h"
 #include "sonora.h"
 
-static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 150;
+static const CGFloat kRowWidth = 300, kRowHeight = 40, kMaxVolume = 100; // 100% = the app's own level
 
 static BOOL reduceMotion(void) {
     return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
@@ -160,11 +160,10 @@ static void animateIn(NSView *view, NSUInteger index) {
     [_activity setPlaying:app.playing call:app.inCall];
     [self addSubview:_activity];
 
-    // A call can't be made louder than the call app itself, so its slider stops at 100%.
-    double maxVolume = app.inCall ? 100 : kMaxVolume;
-    _slider = [NSSlider sliderWithValue:fmin([engine volumeForKey:_key], maxVolume) minValue:0 maxValue:maxVolume
+    // 100% is the app exactly as it plays without Sonora; sliding left turns it down.
+    _slider = [NSSlider sliderWithValue:fmin([engine volumeForKey:_key], kMaxVolume) minValue:0 maxValue:kMaxVolume
                                  target:self action:@selector(sliderMoved:)];
-    if (app.inCall) _slider.toolTip = @"100% is the call exactly as the app plays it. Slide left to turn it down.";
+    _slider.toolTip = @"100% is the app exactly as it sounds without Sonora. Slide left to turn it down.";
     _slider.frame = NSMakeRect(48, 3, 196, 20);
     _slider.controlSize = NSControlSizeSmall;
     _slider.continuous = YES;
@@ -203,7 +202,7 @@ static void animateIn(NSView *view, NSUInteger index) {
 
 - (void)sliderMoved:(NSSlider *)slider {
     double v = round(slider.doubleValue);
-    if (fabs(v - 100) < 3) v = 100; // snap to the "untouched" level
+    if (v > 97) v = 100; // snap to the "untouched" level
     slider.doubleValue = v;
     [self updateLabelsAnimated:NO];
     [[SNEngine shared] setVolume:v muted:_muted forKey:_key];

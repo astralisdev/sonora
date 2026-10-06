@@ -31,6 +31,7 @@ func main() {
 	list := flag.Bool("list", false, "list audio processes grouped by app and exit")
 	snapshot := flag.String("snapshot", "", "debug: render a menu row for every audio process to this PNG file")
 	welcomeShot := flag.String("snapshot-welcome", "", "debug: render the welcome window to this PNG file")
+	compare := flag.String("compare", "", "debug: alternate an app (bundle ID) between direct playback and Sonora at 100%")
 	flag.Parse()
 
 	switch {
@@ -44,6 +45,10 @@ func main() {
 	case *welcomeShot != "":
 		cs := C.CString(*welcomeShot)
 		C.SNSnapshotWelcome(cs)
+		return
+	case *compare != "":
+		cs := C.CString(*compare)
+		C.SNCompare(cs)
 		return
 	case *list:
 		C.SNListProcesses()
