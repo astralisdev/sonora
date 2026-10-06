@@ -27,6 +27,13 @@ typedef struct {
     float releaseCoef; // per-frame recovery towards 1
     unsigned pos;
 
+    // Voice leveling (calls): a slow automatic gain that brings speech to a
+    // fixed loudness, whoever is talking and however the call app sends it.
+    _Atomic float levelTarget; // target mean square of speech; 0 = off
+    float level;               // current leveling gain (linear)
+    float levelEnv;            // smoothed mean square of the input while someone talks
+    double sampleRate;
+
     float outL[SN_MAX_FRAMES], outR[SN_MAX_FRAMES];
 
     // Level meters, filled only when `meter` is set (debug aid, racy on purpose).
@@ -36,8 +43,17 @@ typedef struct {
     float inPeak, outPeak, minLimit;
 } SNDSP;
 
+// Voice leveling limits and timing.
+#define SN_LEVEL_GATE_DB  (-55.0f) // quieter than this is silence: hold the gain
+#define SN_LEVEL_MAX_DB   (30.0f)  // most it will raise a quiet voice
+#define SN_LEVEL_MIN_DB   (-12.0f) // most it will lower a loud one
+
 void sn_dsp_init(SNDSP *d, float gain, double sampleRate);
 void sn_dsp_set_gain(SNDSP *d, float gain);
+
+// Turns voice leveling on with the given speech loudness (dBFS RMS, e.g. -20),
+// or off when targetDB is NAN. Thread-safe.
+void sn_dsp_set_leveling(SNDSP *d, float targetDB);
 
 // Processes `total` frames into d->outL/d->outR. Input frames past `inFrames`
 // (or all of them when srcL is NULL) are treated as silence. srcR may equal srcL

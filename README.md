@@ -80,15 +80,15 @@ When the app goes back to 100%, or has been quiet for a few seconds, the tap is 
 | `main.go` | Entry point and CLI flags (`-list`, `-version`) |
 | `settings.go` | Per-app settings saved to `~/Library/Application Support/Sonora/settings.json` and exported to the native side |
 | `engine.m` | Audio engine: process discovery and grouping, taps, aggregate devices |
-| `dsp.c` / `dsp.h` | Real-time signal path: gain ramp and look-ahead limiter (plain C, unit-tested) |
-| `dsp.go`, `dsp_test.go` | Go wrapper for the DSP, and tests for transparency, clipping, distortion and smoothness |
+| `dsp.c` / `dsp.h` | Real-time signal path: gain ramp, voice leveling and look-ahead limiter (plain C, unit-tested) |
+| `dsp.go`, `dsp_test.go` | Go wrapper for the DSP, and tests for transparency, clipping, distortion, smoothness and voice leveling |
 | `ui.m` | Menu bar item and slider rows (AppKit) |
 
 The UI and audio layers are Objective-C called through cgo, since AppKit and the real-time Core Audio callback have no pure-Go equivalent. Everything else is Go.
 
 ## Known limitations
 
-- **Call apps (WhatsApp, FaceTime, Zoom…)** work, with one twist. macOS raises call audio by a fixed amount (about +20 dB) *after* the point where taps read it. So while a call's voice processing runs on a listed device, Sonora adds that boost back before applying your volume. Calls are detected from the echo canceller's signature: the app reads a speaker device back as an input. Partway into a call, voice processing can move to a private device that macOS doesn't list, where the app reports no devices at all. Taps then get the call at its final level, so the boost is dropped. A detected call lasts as long as the app keeps the microphone running, and ends the moment it stops. The boost was measured on AirPods. If a call sounds too loud or too quiet at 100% on your setup, run `Sonora -calibrate <bundle id>` during a call, pick the step that sounds like "direct", and put that number in `settings.json` as `"callBoostDB"`.
+- **Call apps (WhatsApp, FaceTime, Zoom…)** are detected from the echo canceller's signature (the app reads a speaker device back as an input), and a call lasts as long as the app keeps the microphone running. During a call, **Even Out Voices** (on by default, in *During Calls*) levels speech to the same loudness, about -18 dBFS RMS at 100%. It adapts slowly, ignores pauses, and holds steady when people join or leave or WhatsApp reconfigures its audio. The call slider then sets how loud that level is.
 - **Latency:** an app that is not at 100% is heard about 60 ms late. Most of that delay comes from macOS's tap and aggregate-device path, and Sonora keeps its own part small (128-frame buffers, 1.3 ms limiter). You can notice it as a slight lip-sync offset on video calls. At 100%, Sonora steps out of the way within 3 s and there is no added delay.
 - Creating or removing a tap can cause a very short glitch in other audio.
 - Boosting is limited to +6 dB (150%).
@@ -104,7 +104,6 @@ Every tapped app goes through a **look-ahead peak limiter** with a -1 dBFS ceili
 
 ```sh
 ./build/Sonora.app/Contents/MacOS/Sonora -list          # audio apps; PLAYING / CALL / idle
-./build/Sonora.app/Contents/MacOS/Sonora -calibrate net.whatsapp.WhatsApp   # tune callBoostDB during a call
 SONORA_DEBUG=1 ./build/Sonora.app/Contents/MacOS/Sonora  # logs taps, gains, levels and dropouts
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot rows.png   # renders a menu row for every audio process
 ./build/Sonora.app/Contents/MacOS/Sonora -snapshot-welcome welcome.png   # renders the welcome window

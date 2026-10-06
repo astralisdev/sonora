@@ -8,9 +8,6 @@ void SNRun(void);
 // Prints every process currently known to Core Audio, grouped by app (debug aid).
 void SNListProcesses(void);
 
-// Debug: alternates direct audio with compensated replays to find a matching gain.
-void SNCalibrate(const char *bundleID);
-
 // Debug: renders a menu row for every audio process (apps and system) to a PNG.
 void SNSnapshot(const char *path);
 

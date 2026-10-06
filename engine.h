@@ -21,7 +21,6 @@ extern NSNotificationName const SNEngineCallDidEndNotification;
 @property(nonatomic) BOOL playing;             // any process is producing output
 @property(nonatomic) BOOL listening;           // some process is using the microphone
 @property(nonatomic) BOOL voiceProcessing;     // some process runs Apple voice processing
-@property(nonatomic) BOOL callBoost;           // ...on a listed device, so taps hear it ~20 dB low
 @property(nonatomic) BOOL inCall;              // in a call (see SNEngine refresh)
 @property(nonatomic) BOOL isSystem;            // background/system process rather than a regular app
 // Where this app's volume is stored. Calls have their own volume
@@ -59,6 +58,11 @@ typedef NS_ENUM(int, SNPermission) {
 
 // YES while an app is in a call (running Apple voice processing).
 @property(nonatomic, readonly) BOOL callActive;
+
+// Voice leveling for calls: keeps everyone in a call at the same loudness,
+// whoever talks and whatever the call app does internally. Persisted as
+// evenOutVoices (default on).
+@property(nonatomic) BOOL evenOutVoices;
 
 // How much other apps are lowered while a call is active: 0 = off, 6 or 12 dB,
 // 100 = muted. Persisted in settings.json as callDuckDB.

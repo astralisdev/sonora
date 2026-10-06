@@ -12,6 +12,8 @@ static void *dspNew(float gain, double rate) {
 	return d;
 }
 static void dspSetGain(void *d, float gain) { sn_dsp_set_gain(d, gain); }
+static void dspSetLeveling(void *d, float targetDB) { sn_dsp_set_leveling(d, targetDB); }
+static float dspLevel(void *d) { return ((SNDSP *)d)->level; }
 static void dspProcess(void *d, const float *interleaved, unsigned frames) {
 	sn_dsp_process(d, interleaved, 2, interleaved ? interleaved + 1 : NULL, 2, frames, frames);
 }
@@ -30,6 +32,12 @@ func newDSP(gain float32, sampleRate float64) *dsp {
 
 func (d *dsp) close()               { C.free(d.p) }
 func (d *dsp) setGain(gain float32) { C.dspSetGain(d.p, C.float(gain)) }
+
+// setLeveling turns voice leveling on at targetDB (dBFS RMS), or off for NaN.
+func (d *dsp) setLeveling(targetDB float32) { C.dspSetLeveling(d.p, C.float(targetDB)) }
+
+// level is the current voice-leveling gain.
+func (d *dsp) level() float32 { return float32(C.dspLevel(d.p)) }
 
 // process feeds interleaved stereo frames and returns the left and right output.
 func (d *dsp) process(interleaved []float32) (left, right []float32) {

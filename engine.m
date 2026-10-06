@@ -43,6 +43,10 @@ static const NSTimeInterval kUnityHold = 3.0;
 // instead of the default 512 takes ~16 ms off at 48 kHz for little CPU.
 static const UInt32 kIOBufferFrames = 128;
 
+// Speech loudness that voice leveling aims for at 100% call volume (dBFS RMS,
+// roughly the level of a podcast). The call slider moves it up or down.
+static const float kVoiceLevelDB = -18;
+
 #pragma mark - Core Audio helpers
 
 static AudioObjectPropertyAddress addr(AudioObjectPropertySelector sel, AudioObjectPropertyScope scope) {
@@ -98,12 +102,11 @@ static BOOL hasOutputStreams(AudioObjectID device) {
 }
 
 // How a process is running Apple's voice processing (what call apps use), as
-// seen from its device lists. It matters for the volume: see callBoostDB.
+// seen from its device lists.
 typedef NS_ENUM(int, SNVoiceProcessing) {
     SNVoiceProcessingNone,
     // The echo canceller reads back a speaker device as an input, so a device
-    // with output streams is among the process's *input* devices. In this mode
-    // macOS raises the call audio after the point where taps read it.
+    // with output streams is among the process's *input* devices.
     SNVoiceProcessingListed,
     // Later in a call the processing can move to a private device that macOS
     // doesn't list: the process records and plays but reports no devices at
@@ -448,15 +451,19 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     SNDSP *r = &_render->dsp;
     double n = r->count ? (double)r->count : 1;
     NSString *s = [NSString stringWithFormat:
-        @"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | limiter %5.1f dB | gain %.3f",
+        @"in rms %6.1f peak %6.1f | out rms %6.1f peak %6.1f dB | limiter %5.1f dB | leveling %+5.1f dB | gain %.3f",
         dB(sqrt(r->inSq / n)), dB(r->inPeak), dB(sqrt(r->outSq / n)), dB(r->outPeak), dB(r->minLimit),
-        atomic_load(&r->target)];
+        dB(r->level), atomic_load(&r->target)];
     r->inSq = r->outSq = 0; r->inPeak = r->outPeak = 0; r->count = 0; r->minLimit = 1;
     return s;
 }
 
 - (void)setGain:(float)gain {
     sn_dsp_set_gain(&_render->dsp, gain);
+}
+
+- (void)setLeveling:(BOOL)on {
+    sn_dsp_set_leveling(&_render->dsp, on ? kVoiceLevelDB : NAN);
 }
 
 - (BOOL)heard {
@@ -703,7 +710,6 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
         // A call may run voice processing in one process and play in another,
         // so it's judged across the whole app (resolved after the loop).
         app.voiceProcessing = app.voiceProcessing || vp != SNVoiceProcessingNone;
-        app.callBoost = app.callBoost || vp == SNVoiceProcessingListed;
         app.listening = app.listening || listening;
     }
     for (SNApp *app in ordered) app.inCall = app.playing && app.voiceProcessing;
@@ -721,7 +727,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
             [current addObject:obj];
             if ([_observedProcesses containsObject:obj]) continue;
             // Output start/stop is play/pause; input and device changes are a call
-            // starting or ending, which must be noticed at once (see callBoostDB).
+            // starting or ending, which should be noticed at once.
             AudioObjectPropertySelector watched[] = {
                 kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyIsRunningInput, kAudioProcessPropertyDevices,
             };
@@ -794,16 +800,13 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
     for (SNApp *app in _permissionProblem ? @[] : _apps) {
         float gain = sn_gain_for_percent([self volumeForKey:app.settingsKey], [self mutedForKey:app.settingsKey]);
         if (!app.inCall) gain *= _duck; // lowered while a call is going on
-        if (gain != 1.f) _lastNonUnity[app.key] = now;
+        // Calls go through voice leveling, which needs the tap even at 100%.
+        BOOL level = app.inCall && snEvenOutVoices();
+        if (gain != 1.f || level) _lastNonUnity[app.key] = now;
         NSDate *last = _lastNonUnity[app.key];
         BOOL holding = last && [now timeIntervalSinceDate:last] < kUnityHold;
-        if (gain == 1.f && !holding) continue;
-        // While a call's voice processing is on a listed device, macOS raises the
-        // call audio by a fixed amount *after* the point where taps read it (about
-        // +20 dB, measured), so the replay needs that boost back to sound the
-        // same. On the private device the tap already gets the final level.
-        if (app.inCall && app.callBoost) gain *= (float)pow(10.0, snCallBoostDB() / 20.0);
-        wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain)};
+        if (gain == 1.f && !level && !holding) continue;
+        wanted[app.key] = @{@"processes" : app.processObjects, @"gain" : @(gain), @"level" : @(level)};
     }
     [self reconcile:wanted outputUID:_outputUID];
 }
@@ -835,6 +838,7 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
                 self->_taps[key] = tap;
                 if (gDiag) NSLog(@"sonora[debug] create tap %@ gain %.3f", key, gain);
             }
+            [tap setLeveling:[w[@"level"] boolValue]];
         }];
     });
 }
@@ -847,6 +851,13 @@ static void render(SNRender *r, const AudioBufferList *in, AudioBufferList *out)
 }
 
 - (double)callDuckDB { return snCallDuckDB(); }
+
+- (BOOL)evenOutVoices { return snEvenOutVoices(); }
+
+- (void)setEvenOutVoices:(BOOL)on {
+    snSetEvenOutVoices(on);
+    [self apply];
+}
 
 - (void)setCallDuckDB:(double)dB {
     snSetCallDuckDB(dB);
@@ -943,39 +954,4 @@ void SNListProcesses(void) {
     }
 }
 
-#pragma mark - Calibration
-
-// Debug: alternates an app's direct audio with Sonora's replay at several
-// compensation gains (spoken labels), to find the gain that matches direct.
-void SNCalibrate(const char *bundleID) {
-    @autoreleasepool {
-        SNApp *target = nil;
-        for (SNApp *app in [SNEngine scanApps]) if ([app.key isEqualToString:@(bundleID)]) target = app;
-        if (!target) { printf("no audio process for %s\n", bundleID); return; }
-        NSString *uid = readString(defaultOutputDevice(), kAudioDevicePropertyDeviceUID);
-        struct { const char *label; double dB; } steps[] = {
-            {"direct", -1}, {"plus ten", 10}, {"direct", -1}, {"plus twenty", 20},
-            {"direct", -1}, {"plus fifteen", 15}, {"direct", -1}, {"plus twenty five", 25},
-        };
-        printf("The step that sounds like \"direct\" is your callBoostDB (settings.json, default 20).\n");
-        int count = sizeof(steps) / sizeof(steps[0]);
-        printf("Calibrating %s. Compare each step with the \"direct\" before it. 6 s per step.\n", target.name.UTF8String);
-        for (int i = 0; i < count; i++) {
-            printf("[%d/%d] %s\n", i + 1, count, steps[i].label);
-            fflush(stdout);
-            [NSTask launchedTaskWithExecutableURL:[NSURL fileURLWithPath:@"/usr/bin/say"]
-                arguments:@[ @"-v", @"Samantha", @(steps[i].label) ] error:nil terminationHandler:nil];
-            [NSThread sleepForTimeInterval:1.5];
-            SNTap *tap = nil;
-            if (steps[i].dB >= 0) {
-                tap = [[SNTap alloc] initWithKey:target.key processes:target.processObjects outputUID:uid
-                                            gain:(float)pow(10, steps[i].dB / 20)];
-                if (!tap) { printf("tap failed\n"); return; }
-            }
-            [NSThread sleepForTimeInterval:4.5];
-            tap = nil;
-        }
-        printf("done\n");
-    }
-}
 

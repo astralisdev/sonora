@@ -29,7 +29,6 @@ func init() {
 func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	list := flag.Bool("list", false, "list audio processes grouped by app and exit")
-	calibrate := flag.String("calibrate", "", "debug: compare an app's direct audio with compensated replays")
 	snapshot := flag.String("snapshot", "", "debug: render a menu row for every audio process to this PNG file")
 	welcomeShot := flag.String("snapshot-welcome", "", "debug: render the welcome window to this PNG file")
 	flag.Parse()
@@ -37,10 +36,6 @@ func main() {
 	switch {
 	case *showVersion:
 		fmt.Println("Sonora", version)
-		return
-	case *calibrate != "":
-		cs := C.CString(*calibrate)
-		C.SNCalibrate(cs)
 		return
 	case *snapshot != "":
 		cs := C.CString(*snapshot)

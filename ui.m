@@ -545,6 +545,13 @@ static NSString *const kGlyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@$*+=<
         item.state = fabs([choice[1] doubleValue] - current) < 0.5 ? NSControlStateValueOn : NSControlStateValueOff;
         [duckMenu addItem:item];
     }
+    [duckMenu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *even = [[NSMenuItem alloc] initWithTitle:@"Even Out Voices" action:@selector(toggleEvenOutVoices:) keyEquivalent:@""];
+    even.target = self;
+    even.state = engine.evenOutVoices ? NSControlStateValueOn : NSControlStateValueOff;
+    even.toolTip = @"Keeps everyone in the call at the same comfortable loudness, even when people "
+                   @"join or leave, speak softly, or are on a bad connection.";
+    [duckMenu addItem:even];
     duckItem.submenu = duckMenu;
     [_menu addItem:duckItem];
 
@@ -617,6 +624,11 @@ static NSString *controlCenterString(NSString *key, NSString *fallback) {
     [alert addButtonWithTitle:@"OK"];
     [NSApp activateIgnoringOtherApps:YES];
     [alert runModal];
+}
+
+- (void)toggleEvenOutVoices:(id)sender {
+    SNEngine *engine = [SNEngine shared];
+    engine.evenOutVoices = !engine.evenOutVoices;
 }
 
 - (void)setCallDuck:(NSMenuItem *)sender {
