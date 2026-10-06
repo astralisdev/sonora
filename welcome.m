@@ -9,13 +9,113 @@
 static NSString *const kWelcomeDoneKey = @"WelcomeDone";
 
 @interface SNWelcomeController () <NSWindowDelegate>
-- (void)buildWindow;
-- (void)updatePermission;
+- (void)prepareSnapshot;
+@end
+
+#pragma mark - Deciphering credit
+
+// A label that scrambles from one text into another, character by character,
+// the same effect as the menu bar title. Works on whole characters (emoji
+// included), and pads the shorter text so the two line up.
+@interface SNDecipherLabel : NSTextField
+- (void)cycleBetween:(NSString *)a and:(NSString *)b times:(NSInteger)times;
+- (void)stop;
+@end
+
+@implementation SNDecipherLabel {
+    NSArray<NSString *> *_from, *_to;   // characters of the current and next text
+    NSArray<NSString *> *_texts;
+    NSInteger _shown, _remaining, _frame;
+    NSTimer *_timer;
+}
+
+static NSArray<NSString *> *characters(NSString *s) {
+    NSMutableArray *out = [NSMutableArray new];
+    [s enumerateSubstringsInRange:NSMakeRange(0, s.length) options:NSStringEnumerationByComposedCharacterSequences
+                       usingBlock:^(NSString *c, NSRange r, NSRange e, BOOL *stop) { [out addObject:c]; }];
+    return out;
+}
+
+static NSArray<NSString *> *padded(NSArray<NSString *> *chars, NSUInteger length) {
+    NSMutableArray *out = [chars mutableCopy];
+    NSUInteger extra = length - chars.count;
+    for (NSUInteger i = 0; i < extra / 2; i++) [out insertObject:@" " atIndex:0]; // keep it centred
+    while (out.count < length) [out addObject:@" "];
+    return out;
+}
+
+- (void)cycleBetween:(NSString *)a and:(NSString *)b times:(NSInteger)times {
+    _texts = @[ a, b ];
+    _shown = 0;
+    _remaining = times * 2; // there and back
+    self.stringValue = a;
+    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
+    [self scheduleNext:2.0];
+}
+
+- (void)scheduleNext:(NSTimeInterval)delay {
+    [_timer invalidate];
+    if (_remaining <= 0) return;
+    __weak SNDecipherLabel *weakSelf = self;
+    _timer = [NSTimer timerWithTimeInterval:delay repeats:NO block:^(NSTimer *t) { [weakSelf startTransition]; }];
+    [NSRunLoop.mainRunLoop addTimer:_timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)startTransition {
+    NSArray *from = characters(_texts[_shown]), *to = characters(_texts[1 - _shown]);
+    NSUInteger length = MAX(from.count, to.count);
+    _from = padded(from, length);
+    _to = padded(to, length);
+    _frame = 0;
+    __weak SNDecipherLabel *weakSelf = self;
+    _timer = [NSTimer timerWithTimeInterval:0.035 repeats:YES block:^(NSTimer *t) { [weakSelf tick]; }];
+    [NSRunLoop.mainRunLoop addTimer:_timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)tick {
+    static NSString *const glyphs = @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#%&@$*+=<>?/";
+    _frame++;
+    NSMutableString *s = [NSMutableString new];
+    BOOL done = YES;
+    for (NSUInteger i = 0; i < _to.count; i++) {
+        NSInteger revealAt = 4 + (NSInteger)i; // left to right, ~1 s for the whole line
+        NSString *target = _to[i];
+        if (_frame >= revealAt) {
+            [s appendString:target];
+        } else if ([target isEqualToString:@" "] && [_from[i] isEqualToString:@" "]) {
+            [s appendString:@" "];
+        } else {
+            [s appendFormat:@"%C", [glyphs characterAtIndex:arc4random_uniform((uint32_t)glyphs.length)]];
+            done = NO;
+        }
+    }
+    self.stringValue = [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if (done) {
+        [_timer invalidate];
+        _shown = 1 - _shown;
+        _remaining--;
+        [self scheduleNext:_shown == 1 ? 2.2 : 2.0];
+    }
+}
+
+- (void)stop {
+    [_timer invalidate];
+    _timer = nil;
+}
+
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds cursor:NSCursor.pointingHandCursor];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/astralisdev"]];
+}
 @end
 
 @implementation SNWelcomeController {
     NSButton *_allowButton, *_loginCheckbox;
     NSTextField *_allowStatus;
+    SNDecipherLabel *_credit;
     NSTimer *_poll;
     void (^_onDone)(void);
 }
@@ -38,6 +138,7 @@ static NSString *const kWelcomeDoneKey = @"WelcomeDone";
     [_poll invalidate];
     __weak SNWelcomeController *weakSelf = self;
     _poll = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { [weakSelf updatePermission]; }];
+    [_credit cycleBetween:@"Made with ❤️ by @astralisdev" and:@"eyes on the stars!" times:4];
     [NSApp activateIgnoringOtherApps:YES];
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
@@ -130,12 +231,20 @@ static NSView *stepRow(NSString *symbol, NSColor *tint, NSString *title, NSStrin
     done.keyEquivalent = @"\r";
     done.controlSize = NSControlSizeLarge;
 
-    NSStackView *content = [NSStackView stackViewWithViews:@[ appIcon, title, subtitle, steps, done ]];
+    _credit = [SNDecipherLabel labelWithString:@""];
+    _credit.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightMedium];
+    _credit.textColor = NSColor.tertiaryLabelColor;
+    _credit.alignment = NSTextAlignmentCenter;
+    _credit.toolTip = @"github.com/astralisdev";
+    [_credit.widthAnchor constraintEqualToConstant:300].active = YES;
+
+    NSStackView *content = [NSStackView stackViewWithViews:@[ appIcon, title, subtitle, steps, done, _credit ]];
     content.orientation = NSUserInterfaceLayoutOrientationVertical;
     content.alignment = NSLayoutAttributeCenterX;
     content.spacing = 10;
     [content setCustomSpacing:22 afterView:subtitle];
     [content setCustomSpacing:26 afterView:steps];
+    [content setCustomSpacing:18 afterView:done];
     content.edgeInsets = NSEdgeInsetsMake(36, 36, 28, 36);
     content.translatesAutoresizingMaskIntoConstraints = NO;
     [steps.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-72].active = YES;
@@ -156,6 +265,12 @@ static NSView *stepRow(NSString *symbol, NSColor *tint, NSString *title, NSStrin
 }
 
 #pragma mark - Actions
+
+- (void)prepareSnapshot {
+    [self buildWindow];
+    [self updatePermission];
+    [_credit cycleBetween:@"Made with ❤️ by @astralisdev" and:@"eyes on the stars!" times:0];
+}
 
 - (void)updatePermission {
     switch ([SNEngine shared].permission) {
@@ -201,6 +316,7 @@ static NSView *stepRow(NSString *symbol, NSColor *tint, NSString *title, NSStrin
 }
 
 - (void)windowWillClose:(NSNotification *)note {
+    [_credit stop];
     [_poll invalidate];
     _poll = nil;
     [NSUserDefaults.standardUserDefaults setBool:YES forKey:kWelcomeDoneKey];
@@ -217,8 +333,7 @@ void SNSnapshotWelcome(const char *path) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         SNWelcomeController *c = [SNWelcomeController shared];
-        [c buildWindow];
-        [c updatePermission];
+        [c prepareSnapshot];
         NSView *v = c.window.contentView;
         v.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
         [v layoutSubtreeIfNeeded];
